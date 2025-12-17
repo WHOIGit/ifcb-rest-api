@@ -1,6 +1,6 @@
 """Stateless template processor."""
 
-from typing import List
+from typing import List, Literal
 
 from pydantic import BaseModel, Field
 
@@ -11,20 +11,27 @@ class RawBinParams(BaseModel):
     """ Path parameters for the raw_file endpoint. """
 
     bin_id: str = Field(..., description="ID of bin to retrieve.")
-    extension: str = Field(..., description="Extension to use (hdr, adc, roi)"
+    extension: Literal["hdr", "adc", "roi"]
 
 
 class RawBinArchiveParams(BaseModel):
     """ Path parameters for the raw_zip_file endpoint. """
 
     bin_id: str = Field(..., description="ID of bin to retrieve.")
-    extension: str = Field(..., description="Extension to use (zip, tgz)"
+    extension: Literal["zip", "tgz"]
 
 
 class BinIDParams(BaseModel):
     """ Path parameter model with only bin_id. """
 
     bin_id: str = Field(..., description="ID of bin")
+
+
+class ROIImageParams(BaseModel):
+    """ Path parameters for the roi-image endpoint. """
+    
+    roi_id: str = Field(..., description="ID of ROI")
+    extension: Literal["png", "jpg"]
 
 
 class RawProcessor(BaseProcessor):
@@ -86,6 +93,16 @@ class RawProcessor(BaseProcessor):
                 tags=("IFCB",),
                 methods=("GET",),
             ),
+            StatelessAction(
+                name="roi-image",
+                path="/image/roi/{roi id}.{extension}",
+                path_param_model=ROIImageParams,
+                handler=self.handle_roi_id_request,
+                summary="Serve a specified ROI.",
+                description="Serve a specified ROI.",
+                tags=("IFCB",),
+                methods=("GET",),
+            ),
         ]
 
     async def handle_raw_file_request(self, path_params: RawBinParams):
@@ -112,6 +129,11 @@ class RawProcessor(BaseProcessor):
 
     async def handle_roi_id_request(self, path_params: BinIDParams):
         """ Retrieve list of ROI IDs associated with the bin. """
+
+        # TODO
+
+    async def handle_roi_image_request(self, path_params: ROIImageParams):
+        """ Retrieve a specific ROI image. """
 
         # TODO
 
