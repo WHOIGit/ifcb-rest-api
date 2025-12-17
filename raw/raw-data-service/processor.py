@@ -34,6 +34,13 @@ class ROIImageParams(BaseModel):
     extension: Literal["png", "jpg"]
 
 
+class ROIArchiveParams(BaseModel):
+    """ Path parameters for the roi-archive endpoint. """
+
+    bin_id: str = Field(..., description="ID of bin")
+    extension: Literal["zip", "tar"]
+
+
 class RawProcessor(BaseProcessor):
     """Processor for raw data requests."""
 
@@ -103,6 +110,17 @@ class RawProcessor(BaseProcessor):
                 tags=("IFCB",),
                 methods=("GET",),
             ),
+           StatelessAction(
+                name="roi-archive",
+                path="/image/rois/{bin id}.{extension}",
+                path_param_model=ROIArchiveParams,
+                handler=self.handle_roi_archive_request,
+                summary="Serve ROI images in a tar/zip archive.",
+                description="Serve ROI images in a tar/zip archive.",
+                tags=("IFCB",),
+                methods=("GET",),
+            ),
+
         ]
 
     async def handle_raw_file_request(self, path_params: RawBinParams):
@@ -138,6 +156,11 @@ class RawProcessor(BaseProcessor):
         # TODO
 
     async def handle_metadata_request(self, path_params: BinIDParams):
-        """ Retriebe metadata from the header file. """
+        """ Retrieve metadata from the header file. """
 
-        # TODO 
+        # TODO
+
+    async def handle_roi_archive_request(self, path_params: ROIArchiveParams):
+        """ Retrieve a tar/zip archive of ROI images for a given bin. """
+
+        # TODO
