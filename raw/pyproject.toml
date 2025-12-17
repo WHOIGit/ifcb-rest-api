@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "amplify-stateless @ git+https://github.com/WHOIGit/amplify-stateless-microservice.git@v1.3.1",
+    "aiofiles",
 ]
 
 [build-system]
