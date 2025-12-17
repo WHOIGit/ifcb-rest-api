@@ -1,4 +1,5 @@
 """Stateless template processor."""
+from io import BytesIO
 import os
 
 from typing import List, Literal
@@ -67,9 +68,9 @@ class RawProcessor(BaseProcessor):
             ),
             StatelessAction(
                 name="raw-archive-file",
-                path="/data/raw/{bin_id}.{extension}",
+                path="/data/archive/{bin_id}.{extension}",
                 path_params_model=RawBinArchiveParams,
-                handler=self.handle_raw_file_request,
+                handler=self.handle_raw_archive_file_request,
                 summary="Serve raw IFCB bin files in an archive.",
                 description="Serve raw IFCB bin files in an archive.",
                 tags=("IFCB",),
@@ -77,7 +78,7 @@ class RawProcessor(BaseProcessor):
             ),
             StatelessAction(
                 name="archive-zip",
-                path="/data/archive/{bin_id}.zip",
+                path="/data/zip/{bin_id}.zip",
                 path_params_model=BinIDParams,
                 handler=self.handle_archive_zip_request,
                 summary="Serve archival zip formatted data.",
@@ -128,6 +129,10 @@ class RawProcessor(BaseProcessor):
 
         ]
 
+    async def raw_data_paths(self, bin_id: str):
+        dd = IfcbDataDirectory(os.getenv("IFCB_RAW_DATA_DIR", "/data/raw"))
+        return await dd.paths(bin_id)
+    
     async def handle_raw_file_request(self, path_params: RawBinParams):
         """ Retrieve raw IFCB files. """
         if path_params.extension == "adc":
@@ -139,9 +144,8 @@ class RawProcessor(BaseProcessor):
         else:
             require_adc = False
             require_roi = False
-        dd = IfcbDataDirectory(os.getenv("IFCB_RAW_DATA_DIR", "/data/raw"), require_adc=require_adc, require_roi=require_roi)
         try:
-            paths = await dd.paths(path_params.bin_id)
+            paths = await self.raw_data_paths(path_params.bin_id)
         except KeyError:
             raise HTTPException(status_code=404, detail=f"Bin ID {path_params.bin_id} not found.")
         path = paths.get(path_params.extension)
@@ -160,13 +164,29 @@ class RawProcessor(BaseProcessor):
     async def handle_raw_archive_file_request(self, path_params: RawBinArchiveParams):
         """ Retrieve raw IFCB files in a zip or tar/gzip archive. """
 
-        if path_params.compression_type == "zip":
+        if path_params.extension == "zip":
             media_type = "application/zip"
-        elif path_params.compression_type == "tgz":
+        elif path_params.extension == "tgz":
             media_type = "application/gzip"
 
-        content = "" #TODO
-        return render_bytes(content, media_type)
+        paths = await self.raw_data_paths(path_params.bin_id)
+
+        buffer = BytesIO()
+
+        if path_params.extension == "zip":
+            import zipfile
+            with zipfile.ZipFile(buffer, 'w') as zipf:
+                for ext, path in paths.items():
+                    zipf.write(path, arcname=f"{path_params.bin_id}.{ext}")
+        elif path_params.extension == "tgz":
+            import tarfile
+            with tarfile.open(fileobj=buffer, mode='w:gz') as tarf:
+                for ext, path in paths.items():
+                    tarf.add(path, arcname=f"{path_params.bin_id}.{ext}")
+
+        buffer.seek(0)
+        
+        return render_bytes(buffer.getvalue(), media_type)
 
     async def handle_archive_zip_request(self, path_params: BinIDParams):
         """ Retrieve archival storage in zip format provided by bin2zip_stream. """

@@ -318,3 +318,8 @@ def bin_timestamp(bin_id: str):
             tzinfo=timezone.utc,
         )
     return dt
+
+
+def add_target(bin_id: str, target: int):
+    """Add a target number to an IFCB bin ID."""
+    return f"{bin_id}_{target:05d}"
