@@ -52,7 +52,7 @@ class RawProcessor(BaseProcessor):
         return [
             StatelessAction(
                 name="raw-file",
-                path="/data/raw/{bin id}.{extension}",
+                path="/data/raw/{bin_id}.{extension}",
                 path_params_model=RawBinParams,
                 handler=self.handle_raw_file_request,
                 summary="Serve a raw IFCB file.",
@@ -62,7 +62,7 @@ class RawProcessor(BaseProcessor):
             ),
             StatelessAction(
                 name="raw-archive-file",
-                path="/data/raw/{bin id}.{extension}",
+                path="/data/raw/{bin_id}.{extension}",
                 path_params_model=RawBinArchiveParams,
                 handler=self.handle_raw_file_request,
                 summary="Serve raw IFCB bin files in an archive.",
@@ -72,7 +72,7 @@ class RawProcessor(BaseProcessor):
             ),
             StatelessAction(
                 name="archive-zip",
-                path="/data/archive/{bin id}.zip",
+                path="/data/archive/{bin_id}.zip",
                 path_params_model=BinIDParams,
                 handler=self.handle_archive_zip_request,
                 summary="Serve archival zip formatted data.",
@@ -82,7 +82,7 @@ class RawProcessor(BaseProcessor):
             ),
             StatelessAction(
                 name="roi-ids",
-                path="/data/rois/{bin id}.json",
+                path="/data/rois/{bin_id}.json",
                 path_params_model=BinIDParams,
                 handler=self.handle_roi_id_request,
                 summary="Serve list of ROI IDs associated with the bin.",
@@ -92,7 +92,7 @@ class RawProcessor(BaseProcessor):
             ),
             StatelessAction(
                 name="metadata",
-                path="/data/rois/{bin id}.json",
+                path="/data/rois/{bin_id}.json",
                 path_params_model=BinIDParams,
                 handler=self.handle_roi_id_request,
                 summary="Serve metadata from the header file.",
@@ -102,7 +102,7 @@ class RawProcessor(BaseProcessor):
             ),
             StatelessAction(
                 name="roi-image",
-                path="/image/roi/{roi id}.{extension}",
+                path="/image/roi/{roi_id}.{extension}",
                 path_params_model=ROIImageParams,
                 handler=self.handle_roi_id_request,
                 summary="Serve a specified ROI.",
@@ -112,7 +112,7 @@ class RawProcessor(BaseProcessor):
             ),
            StatelessAction(
                 name="roi-archive",
-                path="/image/rois/{bin id}.{extension}",
+                path="/image/rois/{bin_id}.{extension}",
                 path_params_model=ROIArchiveParams,
                 handler=self.handle_roi_archive_request,
                 summary="Serve ROI images in a tar/zip archive.",
