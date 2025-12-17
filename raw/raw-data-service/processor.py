@@ -21,6 +21,12 @@ class RawBinArchiveParams(BaseModel):
     extension: str = Field(..., description="Extension to use (zip, tgz)"
 
 
+class BinIDParams(BaseModel):
+    """ Path parameter model with only bin_id. """
+
+    bin_id: str = Field(..., description="ID of bin")
+
+
 class RawProcessor(BaseProcessor):
     """Processor for raw data requests."""
 
@@ -36,7 +42,7 @@ class RawProcessor(BaseProcessor):
                 path_param_model=RawBinParams,
                 handler=self.handle_raw_file_request,
                 summary="Serve a raw IFCB file.",
-                description="Serve a raw IFCB file..",
+                description="Serve a raw IFCB file.",
                 tags=("IFCB",),
                 methods=("GET",),
             ),
@@ -50,7 +56,36 @@ class RawProcessor(BaseProcessor):
                 tags=("IFCB",),
                 methods=("GET",),
             ),
-
+            StatelessAction(
+                name="archive-zip",
+                path="/data/archive/{bin id}.zip",
+                path_param_mode=BinIDParams,
+                handler=self.handle_archive_zip_request,
+                summary="Serve archival zip formatted data.",
+                description="Serve archival zip formatted data",
+                tags=("IFCB",),
+                methods=("GET",),
+            ),
+            StatelessAction(
+                name="roi-ids",
+                path="/data/rois/{bin id}.json",
+                path_param_model=BinIDParams,
+                handler=self.handle_roi_id_request,
+                summary="Serve list of ROI IDs associated with the bin.",
+                description="Serve list of ROI IDs associated with the bin.",
+                tags=("IFCB",),
+                methods=("GET",),
+            ),
+            StatelessAction(
+                name="metadata",
+                path="/data/rois/{bin id}.json",
+                path_param_model=BinIDParams,
+                handler=self.handle_roi_id_request,
+                summary="Serve metadata from the header file.",
+                description="Serve metadata from the header file.",
+                tags=("IFCB",),
+                methods=("GET",),
+            ),
         ]
 
     async def handle_raw_file_request(self, path_params: RawBinParams):
@@ -69,3 +104,18 @@ class RawProcessor(BaseProcessor):
 
         content = "" #TODO
         return render_bytes(content, media_type)
+
+    async def handle_archive_zip_request(self, path_params: BinIDParams):
+        """ Retrieve archival storage in zip format provided by bin2zip_stream. """
+
+        # TODO
+
+    async def handle_roi_id_request(self, path_params: BinIDParams):
+        """ Retrieve list of ROI IDs associated with the bin. """
+
+        # TODO
+
+    async def handle_metadata_request(self, path_params: BinIDParams):
+        """ Retriebe metadata from the header file. """
+
+        # TODO 
