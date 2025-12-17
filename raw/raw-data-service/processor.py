@@ -1,10 +1,15 @@
 """Stateless template processor."""
+import os
 
 from typing import List, Literal
 
+import aiofiles
+from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from stateless_microservice import BaseProcessor, StatelessAction, render_bytes
+
+from .ifcb import IfcbDataDirectory
 
 
 class RawBinParams(BaseModel):
@@ -125,9 +130,32 @@ class RawProcessor(BaseProcessor):
 
     async def handle_raw_file_request(self, path_params: RawBinParams):
         """ Retrieve raw IFCB files. """
-
-        # TODO
-        return "" 
+        if path_params.extension == "adc":
+            require_adc = True
+            require_roi = False
+        elif path_params.extension == "roi":
+            require_adc = True
+            require_roi = True
+        else:
+            require_adc = False
+            require_roi = False
+        dd = IfcbDataDirectory(os.getenv("IFCB_RAW_DATA_DIR", "/data/raw"), require_adc=require_adc, require_roi=require_roi)
+        try:
+            paths = await dd.paths(path_params.bin_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"Bin ID {path_params.bin_id} not found.")
+        path = paths.get(path_params.extension)
+        if path is None:
+            raise FileNotFoundError(f"No file with extension {path_params.extension} for bin {path_params.bin_id}")
+        # read file contents from path
+        async with aiofiles.open(path, mode='rb') as f:
+            content = await f.read()
+        media_type = {
+            "hdr": "text/plain",
+            "adc": "text/csv",
+            "roi": "application/octet-stream",
+        }[path_params.extension]
+        return render_bytes(content, media_type)
 
     async def handle_raw_archive_file_request(self, path_params: RawBinArchiveParams):
         """ Retrieve raw IFCB files in a zip or tar/gzip archive. """
