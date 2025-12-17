@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from stateless_microservice import BaseProcessor, StatelessAction, render_bytes
 
-from .ifcb import IfcbDataDirectory
+from .ifcb import IfcbDataDirectory, add_target
 
 
 class RawBinParams(BaseModel):
@@ -129,8 +129,11 @@ class RawProcessor(BaseProcessor):
 
         ]
 
+    def data_directory(self) -> IfcbDataDirectory:
+        return IfcbDataDirectory(os.getenv("IFCB_RAW_DATA_DIR", "/data/raw"))
+    
     async def raw_data_paths(self, bin_id: str):
-        dd = IfcbDataDirectory(os.getenv("IFCB_RAW_DATA_DIR", "/data/raw"))
+        dd = self.data_directory()
         return await dd.paths(bin_id)
     
     async def handle_raw_file_request(self, path_params: RawBinParams):
@@ -210,5 +213,36 @@ class RawProcessor(BaseProcessor):
 
     async def handle_roi_archive_request(self, path_params: ROIArchiveParams):
         """ Retrieve a tar/zip archive of ROI images for a given bin. """
+        dd = self.data_directory()
+        pid = path_params.bin_id
+        images = await dd.read_images(pid)
 
-        # TODO
+        def format_image(image):
+            img_buffer = BytesIO()
+            image.save(img_buffer, format='PNG')
+            img_buffer.seek(0)
+            return img_buffer.getvalue()
+
+        buffer = BytesIO()
+        if path_params.extension == "zip":
+            import zipfile
+            with zipfile.ZipFile(buffer, 'w') as zipf:
+                for target, image in images.items():
+                    roi_id = add_target(pid, target)
+                    zipf.writestr(f"{roi_id}.png", format_image(image))
+        elif path_params.extension == "tar":
+            import tarfile
+            with tarfile.open(fileobj=buffer, mode='w') as tarf:
+                for target, image in images.items():
+                    roi_id = add_target(pid, target)
+                    info = tarfile.TarInfo(name=f"{roi_id}.png")
+                    img_data = format_image(image)
+                    info.size = len(img_data)
+                    tarf.addfile(tarinfo=info, fileobj=BytesIO(img_data))
+
+        buffer.seek(0)
+        media_type = {
+            "zip": "application/zip",
+            "tar": "application/x-tar",
+        }[path_params.extension]
+        return render_bytes(buffer.getvalue(), media_type)

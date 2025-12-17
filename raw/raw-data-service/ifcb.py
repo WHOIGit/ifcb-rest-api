@@ -1,7 +1,11 @@
+import aiofiles
 import aiofiles.os as aios
 import aiofiles.ospath as aiopath
 import asyncio
 import os
+
+from PIL import Image
+
 
 DEFAULT_EXCLUDE = ['skip', 'beads']
 DEFAULT_INCLUDE = ['data']
@@ -246,6 +250,35 @@ class IfcbDataDirectory:
                 'roi': os.path.join(dp, bn + '.roi') if self.require_roi else None,
             }
 
+    async def read_images(self, pid):
+        """Read ROI images from the fileset for the given PID."""
+        if not self.require_roi:
+            raise ValueError('require_roi must be True to read ROI images')
+        paths = await self.paths(pid)
+        adc_path = paths.get('adc')
+        roi_path = paths.get('roi')
+        if pid.startswith('I'):
+            w_col, h_col, offset_col = 11, 12, 13
+        else:
+            w_col, h_col, offset_col = 15, 16, 17
+        images = {}
+        async with aiofiles.open(roi_path, 'rb') as roi_file:
+            async with aiofiles.open(adc_path, 'r') as adc_file:
+                i = 0
+                async for line in adc_file:
+                    fields = line.strip().split(',')
+                    width = int(fields[w_col])
+                    height = int(fields[h_col])
+                    if width == 0 or height == 0:
+                        continue
+                    offset = int(fields[offset_col])
+                    await roi_file.seek(offset)
+                    data = await roi_file.read(width * height)
+                    image = Image.frombuffer('L', (width, height), data, 'raw', 'L', 0, 1)
+                    images[i+1] = image
+                    i += 1
+        return images
+
 # parse "I" style bin IDs in the form 'IFCB{n}_{yyyy}_{ddd}_{hh}{mm}{ss}'
 def parse_ifcb_i_bin_id(bin_id):
     import re
@@ -323,3 +356,5 @@ def bin_timestamp(bin_id: str):
 def add_target(bin_id: str, target: int):
     """Add a target number to an IFCB bin ID."""
     return f"{bin_id}_{target:05d}"
+
+    
