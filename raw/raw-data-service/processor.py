@@ -79,16 +79,6 @@ class RawProcessor(BaseProcessor):
                 methods=("GET",),
             ),
             StatelessAction(
-                name="archive-zip",
-                path="/data/zip/{bin_id}.zip",
-                path_params_model=BinIDParams,
-                handler=self.handle_archive_zip_request,
-                summary="Serve archival zip formatted data.",
-                description="Serve archival zip formatted data",
-                tags=("IFCB",),
-                methods=("GET",),
-            ),
-            StatelessAction(
                 name="roi-ids",
                 path="/data/rois/{bin_id}.json",
                 path_params_model=BinIDParams,
@@ -192,10 +182,6 @@ class RawProcessor(BaseProcessor):
         buffer.seek(0)
         
         return render_bytes(buffer.getvalue(), media_type)
-
-    async def handle_archive_zip_request(self, path_params: BinIDParams):
-        """ Retrieve archival storage in zip format provided by bin2zip_stream. """
-        # TODO
 
     async def handle_roi_list_request(self, path_params: BinIDParams):
         """ Retrieve list of ROI IDs associated with the bin. """
