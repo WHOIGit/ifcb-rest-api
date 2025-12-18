@@ -1,4 +1,5 @@
 """Stateless template processor."""
+import asyncio
 from io import BytesIO
 import os
 
@@ -98,9 +99,9 @@ class RawProcessor(BaseProcessor):
             ),
             StatelessAction(
                 name="metadata",
-                path="/data/rois/{bin_id}.json",
+                path="/metadata/raw/{bin_id}.json",
                 path_params_model=BinIDParams,
-                handler=self.handle_roi_id_request,
+                handler=self.handle_metadata_request,
                 summary="Serve metadata from the header file.",
                 description="Serve metadata from the header file.",
                 tags=("IFCB",),
@@ -178,14 +179,14 @@ class RawProcessor(BaseProcessor):
 
         if path_params.extension == "zip":
             import zipfile
-            with zipfile.ZipFile(buffer, 'w') as zipf:
+            with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
                 for ext, path in paths.items():
-                    zipf.write(path, arcname=f"{path_params.bin_id}.{ext}")
+                    await asyncio.to_thread(zipf.write, path, arcname=f"{path_params.bin_id}.{ext}")
         elif path_params.extension == "tgz":
             import tarfile
             with tarfile.open(fileobj=buffer, mode='w:gz') as tarf:
                 for ext, path in paths.items():
-                    tarf.add(path, arcname=f"{path_params.bin_id}.{ext}")
+                    await asyncio.to_thread(tarf.add, path, arcname=f"{path_params.bin_id}.{ext}")
 
         buffer.seek(0)
         
@@ -229,16 +230,16 @@ class RawProcessor(BaseProcessor):
             with zipfile.ZipFile(buffer, 'w') as zipf:
                 for target, image in images.items():
                     roi_id = add_target(pid, target)
-                    zipf.writestr(f"{roi_id}.png", format_image(image))
+                    await asyncio.to_thread(zipf.writestr, f"{roi_id}.png", format_image(image))
         elif path_params.extension == "tar":
             import tarfile
             with tarfile.open(fileobj=buffer, mode='w') as tarf:
                 for target, image in images.items():
                     roi_id = add_target(pid, target)
                     info = tarfile.TarInfo(name=f"{roi_id}.png")
-                    img_data = format_image(image)
+                    img_data = await asyncio.to_thread(format_image, image)
                     info.size = len(img_data)
-                    tarf.addfile(tarinfo=info, fileobj=BytesIO(img_data))
+                    await asyncio.to_thread(tarf.addfile, tarinfo=info, fileobj=BytesIO(img_data))
 
         buffer.seek(0)
         media_type = {

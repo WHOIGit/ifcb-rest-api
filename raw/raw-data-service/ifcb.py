@@ -270,12 +270,13 @@ class IfcbDataDirectory:
                     width = int(fields[w_col])
                     height = int(fields[h_col])
                     if width == 0 or height == 0:
-                        continue
-                    offset = int(fields[offset_col])
-                    await roi_file.seek(offset)
-                    data = await roi_file.read(width * height)
-                    image = Image.frombuffer('L', (width, height), data, 'raw', 'L', 0, 1)
-                    images[i+1] = image
+                        pass # skip triggers without ROIs
+                    else:
+                        offset = int(fields[offset_col])
+                        await roi_file.seek(offset)
+                        data = await roi_file.read(width * height)
+                        image = await asyncio.to_thread(Image.frombuffer, 'L', (width, height), data, 'raw', 'L', 0, 1)
+                        images[i+1] = image
                     i += 1
         return images
 
