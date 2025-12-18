@@ -250,7 +250,37 @@ class IfcbDataDirectory:
                 'roi': os.path.join(dp, bn + '.roi') if self.require_roi else None,
             }
 
-    async def read_images(self, pid):
+    async def list_images(self, pid):
+        """List ROI image metadata from the fileset for the given PID."""
+        paths = await self.paths(pid)
+        adc_path = paths.get('adc')
+        if pid.startswith('I'):
+            x_col, y_col, w_col, h_col = 9, 10, 11, 12
+        else:
+            x_col, y_col, w_col, h_col = 13, 14, 15, 16
+        images = {}
+        async with aiofiles.open(adc_path, 'r') as adc_file:
+            i = 0
+            async for line in adc_file:
+                fields = line.strip().split(',')
+                x = int(fields[x_col])
+                y = int(fields[y_col])
+                width = int(fields[w_col])
+                height = int(fields[h_col])
+                if width == 0 or height == 0:
+                    pass # skip triggers without ROIs
+                else:
+                    images[i+1] = {
+                        'roi_id': add_target(pid, i+1),
+                        'x': x,
+                        'y': y,
+                        'width': width,
+                        'height': height,
+                    }
+                i += 1
+        return images
+
+    async def read_images(self, pid, rois=None):
         """Read ROI images from the fileset for the given PID."""
         if not self.require_roi:
             raise ValueError('require_roi must be True to read ROI images')
@@ -269,7 +299,9 @@ class IfcbDataDirectory:
                     fields = line.strip().split(',')
                     width = int(fields[w_col])
                     height = int(fields[h_col])
-                    if width == 0 or height == 0:
+                    if rois is not None and (i+1) not in rois:
+                        pass # skip unwanted ROIs
+                    elif width == 0 or height == 0:
                         pass # skip triggers without ROIs
                     else:
                         offset = int(fields[offset_col])
@@ -358,4 +390,14 @@ def add_target(bin_id: str, target: int):
     """Add a target number to an IFCB bin ID."""
     return f"{bin_id}_{target:05d}"
 
-    
+
+def parse_target(roi_id: str):
+    """Parse an IFCB ROI ID into (bin_id, target)."""
+    import re
+    pattern = r'^(IFCB\d+_\d{4}_\d{3}_\d{6}|D\d{8}T\d{6}_IFCB\d+)_(\d{5})$'
+    match = re.match(pattern, roi_id)
+    if not match:
+        raise ValueError(f'Invalid IFCB ROI ID format: {roi_id}')
+    bin_id = match.group(1)
+    target = int(match.group(2))
+    return bin_id, target
