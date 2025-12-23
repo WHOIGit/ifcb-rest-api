@@ -3,6 +3,7 @@ import aiofiles.os as aios
 import aiofiles.ospath as aiopath
 import asyncio
 import os
+import re
 
 from PIL import Image
 
@@ -401,3 +402,67 @@ def parse_target(roi_id: str):
     bin_id = match.group(1)
     target = int(match.group(2))
     return bin_id, target
+
+
+# product files access
+
+async def find_product_file(directory, filename, exhaustive=False):
+    candidate = os.path.join(directory, filename)
+    if await aiopath.exists(candidate):
+        return candidate
+
+    try:
+        names = await aios.listdir(directory)
+    except FileNotFoundError:
+        return None
+
+    for name in names:
+        path = os.path.join(directory, name)
+        if await aiopath.isdir(path):
+            if not exhaustive and name not in filename:
+                continue
+            result = await find_product_file(path, filename, exhaustive=exhaustive)
+            if result is not None:
+                return result
+        elif name == filename:
+            return path
+
+    return None
+
+
+async def list_product_files(directory, regex):
+    try:
+        names = await aios.listdir(directory)
+    except FileNotFoundError:
+        return
+
+    for name in names:
+        path = os.path.join(directory, name)
+        if await aiopath.isdir(path):
+            async for p in list_product_files(path, regex):
+                yield p
+        elif re.match(regex, name):
+            yield path
+
+
+async def product_path(directory, filename, exhaustive=False):
+    path = await find_product_file(directory, filename, exhaustive=exhaustive)
+    if not path:
+        raise FileNotFoundError(f'Product file {filename} not found in {directory}')
+    return path
+
+
+async def blob_path(directory, pid, version=4):
+    filename = f'{pid}_blobs_v{version}.zip'
+    return await product_path(directory, filename)
+
+
+async def class_scores_path(directory, pid, version=4):
+    filename = f'{pid}.csv'
+    return await product_path(directory, filename)
+
+
+async def features_path(directory, pid, version=4):
+    filename = f'{pid}_features_v{version}.zip'
+    return await product_path(directory, filename)
+
