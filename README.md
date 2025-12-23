@@ -4,7 +4,7 @@ This repository contains an initial, experimental implementation of a REST API f
 
 As of Dcecember 2025 it is not ready to be used in production.
 
-It is based on the [AMPLIfy stateless microservice framework](https://github.com/WHOIGit/amplify-stateless-microservice) and the[AMPLIfy storage utilities framework](https://github.com/WHOIGit/amplify-storage-utils). See those repositories for details about the frameworks and utilities.
+It is based on the [AMPLIfy stateless microservice framework](https://github.com/WHOIGit/amplify-stateless-microservice) and the [AMPLIfy storage utilities framework](https://github.com/WHOIGit/amplify-storage-utils). See those repositories for details about the frameworks and utilities.
 
 ## Installation and deployment
 
