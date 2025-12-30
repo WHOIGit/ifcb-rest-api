@@ -8,27 +8,6 @@ from storage.s3 import BucketStore
 class IfcbRoiStore(ObjectStore):
     """S3-backed store for accessing IFCB ROI images."""
 
-    @classmethod
-    def base64_store(
-        cls,
-        bucket_name: str,
-        endpoint_url: str = None,
-        s3_access_key: str = None,
-        s3_secret_key: str = None,
-        prefix: str = "",
-    ):
-        """Create a Base64Store for IFCB ROI images stored in S3."""
-        from storage.utils import Base64Store
-
-        store = cls(
-            bucket_name=bucket_name,
-            endpoint_url=endpoint_url,
-            s3_access_key=s3_access_key,
-            s3_secret_key=s3_secret_key,
-            prefix=prefix,
-        )
-        return Base64Store(store)
-
     def __init__(
         self,
         bucket_name: str,
