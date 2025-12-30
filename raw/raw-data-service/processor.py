@@ -14,8 +14,7 @@ from stateless_microservice import BaseProcessor, StatelessAction, render_bytes
 
 from .ifcb import IfcbDataDirectory, add_target, parse_target
 from .ifcbhdr import parse_hdr_file
-from .ifcb_pid_transformer import IfcbPidTransformer
-from .s3_roi_helpers import list_roi_ids_from_s3
+from .ifcb_parsing import IfcbPidTransformer, list_roi_ids_from_s3
 from storage.s3 import BucketStore
 from storage.utils import KeyTransformingStore
 from PIL import Image
