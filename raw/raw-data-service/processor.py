@@ -14,7 +14,10 @@ from stateless_microservice import BaseProcessor, StatelessAction, render_bytes
 
 from .ifcb import IfcbDataDirectory, add_target, parse_target
 from .ifcbhdr import parse_hdr_file
-from .roistore import IfcbRoiStore
+from .ifcb_pid_transformer import IfcbPidTransformer
+from .s3_roi_helpers import list_roi_ids_from_s3
+from storage.s3 import BucketStore
+from storage.utils import KeyTransformingStore
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -82,13 +85,18 @@ class RawProcessor(BaseProcessor):
             if not self.s3_secret_key:
                 raise ValueError("S3_SECRET_KEY environment variable is required when ROI_BACKEND=s3")
 
-            self.roi_store = IfcbRoiStore(
-                bucket_name=self.s3_bucket,
-                endpoint_url=self.s3_endpoint,
+            # Create S3 bucket store
+            self.bucket_store = BucketStore(
+                s3_url=self.s3_endpoint,
                 s3_access_key=self.s3_access_key,
                 s3_secret_key=self.s3_secret_key,
-                prefix=self.s3_prefix,
+                bucket_name=self.s3_bucket,
             )
+            self.bucket_store.__enter__()
+
+            # Wrap with key transformer for PID -> S3 key conversion
+            transformer = IfcbPidTransformer(prefix=self.s3_prefix)
+            self.roi_store = KeyTransformingStore(self.bucket_store, transformer)
         else:
             # Legacy filesystem ROI access
             self._roi_fs_dir = IfcbDataDirectory(self.raw_data_dir)
@@ -231,8 +239,8 @@ class RawProcessor(BaseProcessor):
         dd = self._roi_meta_dir
 
         if self.roi_backend == "s3":
-            roi_ids = await asyncio.to_thread(self.roi_store.list_roi_ids, pid)
-            if roi_ids is None:
+            roi_ids = await asyncio.to_thread(list_roi_ids_from_s3, self.bucket_store, pid, self.s3_prefix)
+            if not roi_ids:
                 raise HTTPException(status_code=404, detail=f"Bin ID {pid} not found.")
             return {idx + 1: {"roi_id": roi_id} for idx, roi_id in enumerate(roi_ids)}
 
@@ -294,8 +302,8 @@ class RawProcessor(BaseProcessor):
         pid = path_params.bin_id
         roi_ids = []
         if self.roi_backend == "s3":
-            roi_ids = await asyncio.to_thread(self.roi_store.list_roi_ids, pid)
-            if roi_ids is None:
+            roi_ids = await asyncio.to_thread(list_roi_ids_from_s3, self.bucket_store, pid, self.s3_prefix)
+            if not roi_ids:
                 raise HTTPException(status_code=404, detail=f"Bin ID {pid} not found.")
         else:
             images = await dd.list_images(pid)
