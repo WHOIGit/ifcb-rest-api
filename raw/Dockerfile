@@ -23,4 +23,4 @@ ENV PORT=8001
 
 EXPOSE ${PORT}
 
-CMD uvicorn raw-data-service.main:app --host 0.0.0.0 --port ${PORT}
+CMD exec uvicorn raw-data-service.main:app --host 0.0.0.0 --port ${PORT}
