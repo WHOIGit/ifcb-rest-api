@@ -239,10 +239,22 @@ class RawProcessor(BaseProcessor):
         dd = self._roi_meta_dir
 
         if self.roi_backend == "s3":
-            roi_ids = await asyncio.to_thread(list_roi_ids_from_s3, self.bucket_store, pid, self.s3_prefix)
-            if not roi_ids:
+            # List ROIs available in S3
+            roi_ids_in_s3 = await asyncio.to_thread(list_roi_ids_from_s3, self.bucket_store, pid, self.s3_prefix)
+            if not roi_ids_in_s3:
                 raise HTTPException(status_code=404, detail=f"Bin ID {pid} not found.")
-            return {idx + 1: {"roi_id": roi_id} for idx, roi_id in enumerate(roi_ids)}
+
+            # Get full metadata from ADC file (always available locally)
+            image_list = await dd.list_images(pid)
+
+            # Filter to only include ROIs that exist in S3
+            roi_ids_set = set(roi_ids_in_s3)
+            filtered_images = {
+                idx: metadata
+                for idx, metadata in image_list.items()
+                if metadata['roi_id'] in roi_ids_set
+            }
+            return filtered_images
 
         image_list = await dd.list_images(pid)
         return image_list
