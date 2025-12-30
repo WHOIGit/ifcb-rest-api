@@ -1,13 +1,25 @@
-## Required README for package install
+## Raw Data Service
 
-Environment variables for ROI access (S3-backed by default):
-- `ROI_BACKEND` (optional, `s3` default; set to `fs` to use local ROI files)
-- `S3_BUCKET_NAME` (required when `ROI_BACKEND=s3`)
-- `S3_ACCESS_KEY` (required when `ROI_BACKEND=s3`)
-- `S3_SECRET_KEY` (required when `ROI_BACKEND=s3`)
-- `S3_ENDPOINT_URL` (optional, for non-AWS S3)
-- `S3_PREFIX` (optional key prefix)
-- `IFCB_RAW_DATA_DIR` (optional, defaults to `/data/raw` for metadata lookups)
+REST API for serving IFCB raw data files and ROI images.
 
-Notes:
-- When `ROI_BACKEND=s3`, ROI list/archive are derived from S3 keys (no ADC fallback).
+### Required Environment Variables
+
+- `HOST_IFCB_RAW_DATA_DIR` - **Required**. Path on host machine to IFCB raw data directory (mounted to `/data/raw` in container)
+
+### ROI Backend Configuration
+
+- `ROI_BACKEND` - Optional, defaults to `s3`. Set to `fs` to use local ROI files instead of S3
+
+**When `ROI_BACKEND=s3` (default):**
+- `S3_BUCKET_NAME` - **Required**. S3 bucket name
+- `S3_ACCESS_KEY` - **Required**. S3 access key
+- `S3_SECRET_KEY` - **Required**. S3 secret key
+- `S3_ENDPOINT_URL` - Optional. S3 endpoint URL (for non-AWS S3 services)
+- `S3_PREFIX` - Optional. Key prefix for S3 objects (e.g., `ifcb_data`)
+
+**When `ROI_BACKEND=fs`:**
+- ROI images are extracted from local `.roi` files on-the-fly
+
+### Optional Configuration
+
+- `PORT` - Optional, defaults to `8001`. Port for the service (both host and container)
