@@ -1,6 +1,7 @@
 """Stateless template processor."""
 import asyncio
 from io import BytesIO
+import logging
 import os
 
 from typing import List, Literal
@@ -15,6 +16,8 @@ from .ifcb import IfcbDataDirectory, add_target, parse_target
 from .ifcbhdr import parse_hdr_file
 from .roistore import IfcbRoiStore
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 
 class RawBinParams(BaseModel):
@@ -55,7 +58,7 @@ class RawProcessor(BaseProcessor):
     """Processor for raw data requests."""
 
     def __init__(self):
-        self.raw_data_dir = os.getenv("IFCB_RAW_DATA_DIR", "/data/raw")
+        self.raw_data_dir = "/data/raw"  # Always mounted here in container
         self._data_dir = IfcbDataDirectory(self.raw_data_dir)
         # Metadata lookup does not require local .roi files
         self._roi_meta_dir = IfcbDataDirectory(self.raw_data_dir, require_roi=False)
@@ -218,7 +221,7 @@ class RawProcessor(BaseProcessor):
                     await asyncio.to_thread(tarf.add, path, arcname=f"{path_params.bin_id}.{ext}")
 
         buffer.seek(0)
-        
+
         return render_bytes(buffer.getvalue(), media_type)
 
     async def handle_roi_list_request(self, path_params: BinIDParams):
@@ -310,8 +313,9 @@ class RawProcessor(BaseProcessor):
         buffer = BytesIO()
         if path_params.extension == "zip":
             import zipfile
+            files_added = 0
             with zipfile.ZipFile(buffer, 'w') as zipf:
-                for roi_id in roi_ids:
+                for idx, roi_id in enumerate(roi_ids):
                     if self.roi_backend == "s3":
                         image_bytes = await asyncio.to_thread(self.roi_store.get, roi_id)
                     else:
@@ -321,10 +325,14 @@ class RawProcessor(BaseProcessor):
                             continue
                         image_bytes = await asyncio.to_thread(format_image, image)
                     await asyncio.to_thread(zipf.writestr, f"{roi_id}.png", image_bytes)
+                    files_added += 1
+                    if (idx + 1) % 100 == 0:
+                        logger.info(f"Progress: {idx+1}/{len(roi_ids)} ROIs processed, {files_added} added to ZIP")
         elif path_params.extension == "tar":
             import tarfile
+            files_added = 0
             with tarfile.open(fileobj=buffer, mode='w') as tarf:
-                for roi_id in roi_ids:
+                for idx, roi_id in enumerate(roi_ids):
                     if self.roi_backend == "s3":
                         image_bytes = await asyncio.to_thread(self.roi_store.get, roi_id)
                     else:
@@ -336,6 +344,9 @@ class RawProcessor(BaseProcessor):
                     info = tarfile.TarInfo(name=f"{roi_id}.png")
                     info.size = len(image_bytes)
                     await asyncio.to_thread(tarf.addfile, tarinfo=info, fileobj=BytesIO(image_bytes))
+                    files_added += 1
+                    if (idx + 1) % 100 == 0:
+                        logger.info(f"Progress: {idx+1}/{len(roi_ids)} ROIs processed, {files_added} added to TAR")
 
         buffer.seek(0)
         media_type = {

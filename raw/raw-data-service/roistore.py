@@ -1,6 +1,6 @@
 """S3-backed store for IFCB ROI images (ported from ifcb-roi-service)."""
 
-from ifcb import Pid
+from .ifcb_parsing import parse_ifcb_pid
 from storage.object import ObjectStore
 from storage.s3 import BucketStore
 
@@ -49,13 +49,21 @@ class IfcbRoiStore(ObjectStore):
         self.prefix = prefix.rstrip("/")
 
     def _make_key(self, pid: str) -> str:
-        """Convert PID to S3 key."""
-        parsed_pid = Pid(pid)
-        bin_lid = parsed_pid.bin_lid
-        roi_number = int(parsed_pid.target)
+        """Convert PID to S3 key.
+
+        S3 structure: {prefix}/{year}/{bin_lid}/{roi_number:05d}.png
+        Example: ifcb_data/2025/D20250114T172241_IFCB109/00002.png
+        """
+        parsed = parse_ifcb_pid(pid)
+        bin_lid = parsed['bin_lid']
+        roi_number = parsed['target']
 
         # Extract year from bin_lid (bins start with 'D' followed by year)
-        year = bin_lid[1:5] if bin_lid.startswith("D") else "legacy"
+        if bin_lid.startswith("D") and len(bin_lid) >= 5:
+            year = bin_lid[1:5]  # D20250114... -> 2025
+        else:
+            # Legacy format handling
+            year = "legacy"
 
         if self.prefix:
             key = f"{self.prefix}/{year}/{bin_lid}/{roi_number:05d}.png"
@@ -88,21 +96,38 @@ class IfcbRoiStore(ObjectStore):
             yield s3_key
 
     def list_roi_ids(self, bin_id: str):
-        """List ROI IDs for a given bin using S3 key patterns."""
-        year = bin_id[1:5] if bin_id.startswith("D") else "legacy"
+        """List ROI IDs for a given bin using S3 key patterns.
+
+        S3 structure: {prefix}/{year}/{bin_lid}/{roi_number:05d}.png
+        Example: ifcb_data/2025/D20250114T172241_IFCB109/00002.png
+        """
+        # Extract year from bin_id
+        if bin_id.startswith("D") and len(bin_id) >= 5:
+            year = bin_id[1:5]  # D20250114... -> 2025
+        else:
+            year = "legacy"
+
+        # Construct S3 prefix
         if self.prefix:
             prefix = f"{self.prefix}/{year}/{bin_id}/"
         else:
             prefix = f"{year}/{bin_id}/"
+
         roi_ids = []
         for key in self.bucket_store.keys(prefix=prefix):
             filename = key.split("/")[-1]
             if not filename.endswith(".png"):
                 continue
+
+            # Parse filename: {target:05d}.png
+            # Example: 00002.png
             try:
-                target = int(filename[:-4])
+                # Remove .png extension and parse as integer
+                target_str = filename[:-4]
+                target = int(target_str)
+                roi_ids.append(f"{bin_id}_{target:05d}")
             except ValueError:
                 continue
-            roi_ids.append(f"{bin_id}_{target:05d}")
+
         roi_ids.sort()
         return roi_ids
