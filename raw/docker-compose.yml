@@ -7,7 +7,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-auth_password}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-auth_user} -d ${POSTGRES_DB:-auth_db}"]
       interval: 5s
