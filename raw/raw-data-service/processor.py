@@ -16,7 +16,7 @@ from .ifcb import IfcbDataDirectory, add_target, parse_target
 from .ifcbhdr import parse_hdr_file
 from .ifcb_parsing import IfcbPidTransformer, list_roi_ids_from_s3
 from storage.s3 import BucketStore
-from storage.utils import KeyTransformingStore
+from storage.utils import KeyTransformingStore, PrefixKeyTransformer
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -93,9 +93,17 @@ class RawProcessor(BaseProcessor):
             )
             self.bucket_store.__enter__()
 
-            # Wrap with key transformer for PID -> S3 key conversion
-            transformer = IfcbPidTransformer(prefix=self.s3_prefix)
-            self.roi_store = KeyTransformingStore(self.bucket_store, transformer)
+            # Compose transformers: first apply prefix, then IFCB-specific path structure
+            # Inner layer: add S3 prefix (e.g., "ifcb_data/")
+            if self.s3_prefix:
+                prefix_transformer = PrefixKeyTransformer(prefix=self.s3_prefix.rstrip("/") + "/")
+                prefix_store = KeyTransformingStore(self.bucket_store, prefix_transformer)
+            else:
+                prefix_store = self.bucket_store
+
+            # Outer layer: apply IFCB PID -> S3 path transformation
+            ifcb_transformer = IfcbPidTransformer()
+            self.roi_store = KeyTransformingStore(prefix_store, ifcb_transformer)
         else:
             # Legacy filesystem ROI access
             self._roi_fs_dir = IfcbDataDirectory(self.raw_data_dir)
