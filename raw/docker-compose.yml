@@ -1,7 +1,67 @@
 services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-auth_db}
+      POSTGRES_USER: ${POSTGRES_USER:-auth_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-auth_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-auth_user} -d ${POSTGRES_DB:-auth_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    command: redis-server --maxmemory 2gb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  auth-server:
+    image: ghcr.io/whoigit/amplify-stateless-microservice/auth-server:1.3.2-test
+    ports:
+      - "${AUTH_PORT:-8000}:${AUTH_PORT:-8000}"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-auth_user}:${POSTGRES_PASSWORD:-auth_password}@postgres:5432/${POSTGRES_DB:-auth_db}
+      REDIS_URL: redis://redis:6379/0
+      TOKEN_CACHE_TTL: ${TOKEN_CACHE_TTL:-1800}
+      PORT: ${AUTH_PORT:-8000}
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:${AUTH_PORT:-8000}/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   raw_data_service:
     build:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8001:8001"
+      - "${PORT:-8001}:${PORT:-8001}"
+    env_file:
+      - .env
+    environment:
+      PORT: ${PORT:-8001}
+      AUTH_SERVICE_URL: http://auth-server:${AUTH_PORT:-8000}
+    volumes:
+      - ${HOST_IFCB_RAW_DATA_DIR}:/data/raw:ro
+    depends_on:
+      - auth-server
+
+volumes:
+  postgres_data:
+  redis_data:
