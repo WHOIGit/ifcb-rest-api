@@ -5,7 +5,7 @@ description = "Serves raw IFCB data."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "amplify-stateless[auth] @ git+https://github.com/WHOIGit/amplify-stateless-microservice.git@token-auth",
+    "amplify-stateless[auth] @ git+https://github.com/WHOIGit/amplify-stateless-microservice.git@v1.4.0",
     "aiofiles",
     "pillow",
 ]
