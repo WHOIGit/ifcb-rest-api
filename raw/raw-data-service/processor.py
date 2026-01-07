@@ -89,7 +89,7 @@ class RawProcessor(BaseProcessor):
                 description="Serve list of ROI IDs associated with the bin.",
                 tags=("IFCB",),
                 methods=("GET",),
-                required_scopes=["ifcb:rois:list"],
+                required_scopes=["ifcb:raw:read"],
             ),
             StatelessAction(
                 name="metadata",
@@ -100,7 +100,7 @@ class RawProcessor(BaseProcessor):
                 description="Serve metadata from the header file.",
                 tags=("IFCB",),
                 methods=("GET",),
-                required_scopes=["ifcb:metadata:read"],
+                required_scopes=["ifcb:raw:read"],
             ),
             StatelessAction(
                 name="roi-image",
@@ -111,7 +111,7 @@ class RawProcessor(BaseProcessor):
                 description="Serve a specified ROI.",
                 tags=("IFCB",),
                 methods=("GET",),
-                required_scopes=["ifcb:images:read"],
+                required_scopes=["ifcb:raw:read"],
             ),
            StatelessAction(
                 name="roi-archive",
@@ -122,7 +122,7 @@ class RawProcessor(BaseProcessor):
                 description="Serve ROI images in a tar/zip archive.",
                 tags=("IFCB",),
                 methods=("GET",),
-                required_scopes=["ifcb:images:read"],
+                required_scopes=["ifcb:raw:read"],
             ),
 
         ]
