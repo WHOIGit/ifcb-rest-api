@@ -19,8 +19,4 @@ WORKDIR /app/service
 
 RUN uv pip install --system .
 
-ENV PORT=8001
-
-EXPOSE ${PORT}
-
-CMD exec uvicorn raw-data-service.main:app --host 0.0.0.0 --port ${PORT}
+CMD ["sh", "-c", "uvicorn raw-data-service.main:app --host 0.0.0.0 --port ${PORT:-8001}"]

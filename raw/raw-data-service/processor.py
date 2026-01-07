@@ -128,6 +128,7 @@ class RawProcessor(BaseProcessor):
                 description="Serve a raw IFCB file.",
                 tags=("IFCB",),
                 methods=("GET",),
+                required_scopes=["ifcb:raw:read"],
             ),
             StatelessAction(
                 name="raw-archive-file",
@@ -138,6 +139,7 @@ class RawProcessor(BaseProcessor):
                 description="Serve raw IFCB bin files in an archive.",
                 tags=("IFCB",),
                 methods=("GET",),
+                required_scopes=["ifcb:raw:read"],
             ),
             StatelessAction(
                 name="roi-ids",
@@ -148,6 +150,7 @@ class RawProcessor(BaseProcessor):
                 description="Serve list of ROI IDs associated with the bin.",
                 tags=("IFCB",),
                 methods=("GET",),
+                required_scopes=["ifcb:raw:read"],
             ),
             StatelessAction(
                 name="metadata",
@@ -158,6 +161,7 @@ class RawProcessor(BaseProcessor):
                 description="Serve metadata from the header file.",
                 tags=("IFCB",),
                 methods=("GET",),
+                required_scopes=["ifcb:raw:read"],
             ),
             StatelessAction(
                 name="roi-image",
@@ -168,6 +172,7 @@ class RawProcessor(BaseProcessor):
                 description="Serve a specified ROI.",
                 tags=("IFCB",),
                 methods=("GET",),
+                required_scopes=["ifcb:raw:read"],
             ),
            StatelessAction(
                 name="roi-archive",
@@ -178,6 +183,7 @@ class RawProcessor(BaseProcessor):
                 description="Serve ROI images in a tar/zip archive.",
                 tags=("IFCB",),
                 methods=("GET",),
+                required_scopes=["ifcb:raw:read"],
             ),
 
         ]
@@ -189,7 +195,7 @@ class RawProcessor(BaseProcessor):
         dd = self.data_directory()
         return await dd.paths(bin_id)
     
-    async def handle_raw_file_request(self, path_params: RawBinParams):
+    async def handle_raw_file_request(self, path_params: RawBinParams, token_info=None):
         """ Retrieve raw IFCB files. """
         if path_params.extension == "adc":
             require_adc = True
@@ -217,7 +223,7 @@ class RawProcessor(BaseProcessor):
         }[path_params.extension]
         return render_bytes(content, media_type)
 
-    async def handle_raw_archive_file_request(self, path_params: RawBinArchiveParams):
+    async def handle_raw_archive_file_request(self, path_params: RawBinArchiveParams, token_info=None):
         """ Retrieve raw IFCB files in a zip or tar/gzip archive. """
 
         if path_params.extension == "zip":
@@ -244,7 +250,7 @@ class RawProcessor(BaseProcessor):
 
         return render_bytes(buffer.getvalue(), media_type)
 
-    async def handle_roi_list_request(self, path_params: BinIDParams):
+    async def handle_roi_list_request(self, path_params: BinIDParams, token_info=None):
         """ Retrieve list of ROI IDs associated with the bin. """
 
         pid = path_params.bin_id
@@ -271,7 +277,7 @@ class RawProcessor(BaseProcessor):
         image_list = await dd.list_images(pid)
         return image_list
 
-    async def handle_roi_image_request(self, path_params: ROIImageParams):
+    async def handle_roi_image_request(self, path_params: ROIImageParams, token_info=None):
         """ Retrieve a specific ROI image. """
         roi_id = path_params.roi_id
         media_type = {
@@ -310,7 +316,7 @@ class RawProcessor(BaseProcessor):
         img_buffer.seek(0)
         return render_bytes(img_buffer.getvalue(), media_type)
 
-    async def handle_metadata_request(self, path_params: BinIDParams):
+    async def handle_metadata_request(self, path_params: BinIDParams, token_info=None):
         """ Retrieve metadata from the header file. """
         try:
             paths = await self.raw_data_paths(path_params.bin_id)
@@ -320,7 +326,7 @@ class RawProcessor(BaseProcessor):
         props = await asyncio.to_thread(parse_hdr_file, hdr_path)
         return props
 
-    async def handle_roi_archive_request(self, path_params: ROIArchiveParams):
+    async def handle_roi_archive_request(self, path_params: ROIArchiveParams, token_info=None):
         """ Retrieve a tar/zip archive of ROI images for a given bin. """
         dd = self._roi_meta_dir
         pid = path_params.bin_id
