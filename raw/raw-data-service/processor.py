@@ -3,6 +3,7 @@ import asyncio
 from io import BytesIO
 import logging
 import os
+import time
 
 from typing import List, Literal
 
@@ -75,6 +76,7 @@ class RawProcessor(BaseProcessor):
         self.s3_access_key = os.getenv("S3_ACCESS_KEY")
         self.s3_secret_key = os.getenv("S3_SECRET_KEY")
         self.s3_prefix = os.getenv("S3_PREFIX", "")
+        self.s3_concurrent_requests = int(os.getenv("S3_CONCURRENT_REQUESTS", "50"))
 
         if self.roi_backend == "s3":
             if not self.s3_bucket:
@@ -84,12 +86,15 @@ class RawProcessor(BaseProcessor):
             if not self.s3_secret_key:
                 raise ValueError("S3_SECRET_KEY environment variable is required when ROI_BACKEND=s3")
 
-            # Create S3 bucket store
+            # Create S3 bucket store with connection pool sized for concurrent requests
             self.bucket_store = BucketStore(
                 s3_url=self.s3_endpoint,
                 s3_access_key=self.s3_access_key,
                 s3_secret_key=self.s3_secret_key,
                 bucket_name=self.s3_bucket,
+                botocore_config_kwargs={
+                    "max_pool_connections": self.s3_concurrent_requests
+                }
             )
             self.bucket_store.__enter__()
 
@@ -337,43 +342,88 @@ class RawProcessor(BaseProcessor):
             img_buffer.seek(0)
             return img_buffer.getvalue()
 
+        async def fetch_roi_batch(batch_roi_ids):
+            """Fetch a batch of ROIs from S3 concurrently."""
+            tasks = [asyncio.to_thread(self.roi_store.get, roi_id) for roi_id in batch_roi_ids]
+            return await asyncio.gather(*tasks)
+
         buffer = BytesIO()
         if path_params.extension == "zip":
             import zipfile
             files_added = 0
             with zipfile.ZipFile(buffer, 'w') as zipf:
-                for idx, roi_id in enumerate(roi_ids):
-                    if self.roi_backend == "s3":
-                        image_bytes = await asyncio.to_thread(self.roi_store.get, roi_id)
-                    else:
+                if self.roi_backend == "s3":
+                    # Fetch and write ROIs in parallel batches
+                    for batch_start in range(0, len(roi_ids), self.s3_concurrent_requests):
+                        batch_end = min(batch_start + self.s3_concurrent_requests, len(roi_ids))
+                        batch_roi_ids = roi_ids[batch_start:batch_end]
+
+                        # Fetch batch concurrently
+                        start_fetch = time.time()
+                        batch_images = await fetch_roi_batch(batch_roi_ids)
+                        fetch_time = time.time() - start_fetch
+
+                        # Write to zip
+                        start_write = time.time()
+                        for roi_id, image_bytes in zip(batch_roi_ids, batch_images):
+                            await asyncio.to_thread(zipf.writestr, f"{roi_id}.png", image_bytes)
+                            files_added += 1
+                        write_time = time.time() - start_write
+
+                        if batch_end % 100 == 0 or batch_end == len(roi_ids):
+                            logger.info(f"Progress: {batch_end}/{len(roi_ids)} ROIs processed, {files_added} added to ZIP - fetch={fetch_time:.2f}s, write={write_time:.2f}s")
+                else:
+                    # Filesystem backend (sequential)
+                    for idx, roi_id in enumerate(roi_ids):
                         _, target = parse_target(roi_id)
                         image = fs_images.get(target) if fs_images else None
                         if image is None:
                             continue
                         image_bytes = await asyncio.to_thread(format_image, image)
-                    await asyncio.to_thread(zipf.writestr, f"{roi_id}.png", image_bytes)
-                    files_added += 1
-                    if (idx + 1) % 100 == 0:
-                        logger.info(f"Progress: {idx+1}/{len(roi_ids)} ROIs processed, {files_added} added to ZIP")
+                        await asyncio.to_thread(zipf.writestr, f"{roi_id}.png", image_bytes)
+                        files_added += 1
+                        if (idx + 1) % 100 == 0:
+                            logger.info(f"Progress: {idx+1}/{len(roi_ids)} ROIs processed, {files_added} added to ZIP")
         elif path_params.extension == "tar":
             import tarfile
             files_added = 0
             with tarfile.open(fileobj=buffer, mode='w') as tarf:
-                for idx, roi_id in enumerate(roi_ids):
-                    if self.roi_backend == "s3":
-                        image_bytes = await asyncio.to_thread(self.roi_store.get, roi_id)
-                    else:
+                if self.roi_backend == "s3":
+                    # Fetch and write ROIs in parallel batches
+                    for batch_start in range(0, len(roi_ids), self.s3_concurrent_requests):
+                        batch_end = min(batch_start + self.s3_concurrent_requests, len(roi_ids))
+                        batch_roi_ids = roi_ids[batch_start:batch_end]
+
+                        # Fetch batch concurrently
+                        start_fetch = time.time()
+                        batch_images = await fetch_roi_batch(batch_roi_ids)
+                        fetch_time = time.time() - start_fetch
+
+                        # Write to tar
+                        start_write = time.time()
+                        for roi_id, image_bytes in zip(batch_roi_ids, batch_images):
+                            info = tarfile.TarInfo(name=f"{roi_id}.png")
+                            info.size = len(image_bytes)
+                            await asyncio.to_thread(tarf.addfile, tarinfo=info, fileobj=BytesIO(image_bytes))
+                            files_added += 1
+                        write_time = time.time() - start_write
+
+                        if batch_end % 100 == 0 or batch_end == len(roi_ids):
+                            logger.info(f"Progress: {batch_end}/{len(roi_ids)} ROIs processed, {files_added} added to TAR - fetch={fetch_time:.2f}s, write={write_time:.2f}s")
+                else:
+                    # Filesystem backend (sequential)
+                    for idx, roi_id in enumerate(roi_ids):
                         _, target = parse_target(roi_id)
                         image = fs_images.get(target) if fs_images else None
                         if image is None:
                             continue
                         image_bytes = await asyncio.to_thread(format_image, image)
-                    info = tarfile.TarInfo(name=f"{roi_id}.png")
-                    info.size = len(image_bytes)
-                    await asyncio.to_thread(tarf.addfile, tarinfo=info, fileobj=BytesIO(image_bytes))
-                    files_added += 1
-                    if (idx + 1) % 100 == 0:
-                        logger.info(f"Progress: {idx+1}/{len(roi_ids)} ROIs processed, {files_added} added to TAR")
+                        info = tarfile.TarInfo(name=f"{roi_id}.png")
+                        info.size = len(image_bytes)
+                        await asyncio.to_thread(tarf.addfile, tarinfo=info, fileobj=BytesIO(image_bytes))
+                        files_added += 1
+                        if (idx + 1) % 100 == 0:
+                            logger.info(f"Progress: {idx+1}/{len(roi_ids)} ROIs processed, {files_added} added to TAR")
 
         buffer.seek(0)
         media_type = {

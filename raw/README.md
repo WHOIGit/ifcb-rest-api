@@ -16,6 +16,7 @@ REST API for serving IFCB raw data files and ROI images.
 - `S3_SECRET_KEY` - **Required**. S3 secret key
 - `S3_ENDPOINT_URL` - Optional. S3 endpoint URL (for non-AWS S3 services)
 - `S3_PREFIX` - Optional. Key prefix for S3 objects (e.g., `ifcb_data`)
+- `S3_CONCURRENT_REQUESTS` - Optional, defaults to `50`. Number of concurrent S3 requests when fetching ROI archives
 
 **When `ROI_BACKEND=fs`:**
 - ROI images are extracted from local `.roi` files on-the-fly
