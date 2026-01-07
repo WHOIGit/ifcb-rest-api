@@ -4,4 +4,10 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8001:8001"
+      - "${PORT:-8001}:${PORT:-8001}"
+    env_file:
+      - .env
+    environment:
+      PORT: ${PORT:-8001}
+    volumes:
+      - ${HOST_IFCB_RAW_DATA_DIR}:/data/raw:ro
