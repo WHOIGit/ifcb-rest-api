@@ -388,7 +388,6 @@ class RawProcessor(BaseProcessor):
                                 continue
                             image_bytes = format_image(image)
                             zipf.writestr(f"{roi_id}.png", image_bytes)
-                            files_added += 1
                     await asyncio.to_thread(zip_images)
         elif path_params.extension == "tar":
             import tarfile
@@ -428,7 +427,6 @@ class RawProcessor(BaseProcessor):
                             info = tarfile.TarInfo(name=f"{roi_id}.png")
                             info.size = len(image_bytes)
                             tarf.addfile(tarinfo=info, fileobj=BytesIO(image_bytes))
-                            files_added += 1
                     await asyncio.to_thread(tar_images)
         buffer.seek(0)
         media_type = {
