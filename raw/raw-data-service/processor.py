@@ -380,16 +380,15 @@ class RawProcessor(BaseProcessor):
                             logger.info(f"Progress: {batch_end}/{len(roi_ids)} ROIs processed, {files_added} added to ZIP - fetch={fetch_time:.2f}s, write={write_time:.2f}s")
                 else:
                     # Filesystem backend (sequential)
-                    for idx, roi_id in enumerate(roi_ids):
-                        _, target = parse_target(roi_id)
-                        image = fs_images.get(target) if fs_images else None
-                        if image is None:
-                            continue
-                        image_bytes = await asyncio.to_thread(format_image, image)
-                        await asyncio.to_thread(zipf.writestr, f"{roi_id}.png", image_bytes)
-                        files_added += 1
-                        if (idx + 1) % 100 == 0:
-                            logger.info(f"Progress: {idx+1}/{len(roi_ids)} ROIs processed, {files_added} added to ZIP")
+                    def zip_images():
+                        for idx, roi_id in enumerate(roi_ids):
+                            _, target = parse_target(roi_id)
+                            image = fs_images.get(target) if fs_images else None
+                            if image is None:
+                                continue
+                            image_bytes = format_image(image)
+                            zipf.writestr(f"{roi_id}.png", image_bytes)
+                    await asyncio.to_thread(zip_images)
         elif path_params.extension == "tar":
             import tarfile
             files_added = 0
@@ -418,19 +417,17 @@ class RawProcessor(BaseProcessor):
                             logger.info(f"Progress: {batch_end}/{len(roi_ids)} ROIs processed, {files_added} added to TAR - fetch={fetch_time:.2f}s, write={write_time:.2f}s")
                 else:
                     # Filesystem backend (sequential)
-                    for idx, roi_id in enumerate(roi_ids):
-                        _, target = parse_target(roi_id)
-                        image = fs_images.get(target) if fs_images else None
-                        if image is None:
-                            continue
-                        image_bytes = await asyncio.to_thread(format_image, image)
-                        info = tarfile.TarInfo(name=f"{roi_id}.png")
-                        info.size = len(image_bytes)
-                        await asyncio.to_thread(tarf.addfile, tarinfo=info, fileobj=BytesIO(image_bytes))
-                        files_added += 1
-                        if (idx + 1) % 100 == 0:
-                            logger.info(f"Progress: {idx+1}/{len(roi_ids)} ROIs processed, {files_added} added to TAR")
-
+                    def tar_images():
+                        for idx, roi_id in enumerate(roi_ids):
+                            _, target = parse_target(roi_id)
+                            image = fs_images.get(target) if fs_images else None
+                            if image is None:
+                                continue
+                            image_bytes = format_image(image)
+                            info = tarfile.TarInfo(name=f"{roi_id}.png")
+                            info.size = len(image_bytes)
+                            tarf.addfile(tarinfo=info, fileobj=BytesIO(image_bytes))
+                    await asyncio.to_thread(tar_images)
         buffer.seek(0)
         media_type = {
             "zip": "application/zip",

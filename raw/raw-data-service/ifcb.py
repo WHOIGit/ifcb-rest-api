@@ -261,8 +261,9 @@ class IfcbDataDirectory:
             x_col, y_col, w_col, h_col = 13, 14, 15, 16
         images = {}
         async with aiofiles.open(adc_path, 'r') as adc_file:
-            i = 0
-            async for line in adc_file:
+            adc_text = await adc_file.read()
+            adc_lines = adc_text.splitlines()
+            for i, line in enumerate(adc_lines):
                 fields = line.strip().split(',')
                 x = int(fields[x_col])
                 y = int(fields[y_col])
