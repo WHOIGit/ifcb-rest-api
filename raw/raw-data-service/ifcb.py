@@ -279,7 +279,6 @@ class IfcbDataDirectory:
                         'width': width,
                         'height': height,
                     }
-                i += 1
         return images
 
     async def read_images(self, pid, rois=None):
