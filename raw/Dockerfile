@@ -13,9 +13,14 @@ ENV PATH="/root/.local/bin:$PATH"
 # No log buffering
 ENV PYTHONUNBUFFERED=1
 
-COPY . ./service
-
 WORKDIR /app/service
+
+COPY ./pyproject.toml .
+
+RUN uv pip compile pyproject.toml -o requirements.txt
+RUN uv pip install --system -r requirements.txt
+
+COPY . /app/service
 
 RUN uv pip install --system .
 
