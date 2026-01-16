@@ -19,4 +19,4 @@ WORKDIR /app/service
 
 RUN uv pip install --system .
 
-CMD ["sh", "-c", "uvicorn raw-data-service.main:app --host 0.0.0.0 --port ${PORT:-8001}"]
+CMD ["sh", "-c", "gunicorn raw-data-service.main:app --workers 96 --worker-class sync --threads 1 --timeout 0 --bind 0.0.0.0:${PORT:-8001}"]

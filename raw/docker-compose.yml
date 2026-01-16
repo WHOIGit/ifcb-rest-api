@@ -56,6 +56,7 @@ services:
     environment:
       PORT: ${PORT:-8001}
       AUTH_SERVICE_URL: http://auth-server:${AUTH_PORT:-8000}
+    command: gunicorn raw-data-service.main:app --workers 8 --worker-class uvicorn.workers.UvicornWorker --threads 1 --bind 0.0.0.0:${PORT:-8001} --timeout 120
     volumes:
       - ${HOST_IFCB_RAW_DATA_DIR}:/data/raw:ro
     depends_on:

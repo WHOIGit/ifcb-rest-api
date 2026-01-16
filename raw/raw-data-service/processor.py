@@ -293,13 +293,13 @@ class RawProcessor(BaseProcessor):
             png_bytes = await asyncio.to_thread(self.roi_store.get, roi_id)
 
             if path_params.extension == "png":
-                return render_bytes(png_bytes, media_type)
+                return render_bytes(png_bytes, media_type, headers={'Expires': 'Fri, 01 Jan 2038 00:00:00 GMT'})
 
             img_buffer = BytesIO()
             image = Image.open(BytesIO(png_bytes))
             await asyncio.to_thread(image.convert("RGB").save, img_buffer, format="JPEG")
             img_buffer.seek(0)
-            return render_bytes(img_buffer.getvalue(), media_type)
+            return render_bytes(img_buffer.getvalue(), media_type, headers={'Expires': 'Fri, 01 Jan 2038 00:00:00 GMT'})
 
         # Legacy filesystem ROI retrieval
         pid, target = parse_target(roi_id)
