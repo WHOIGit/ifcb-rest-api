@@ -9,7 +9,8 @@ dependencies = [
     "amplify-storage-utils[s3] @ git+https://github.com/WHOIGit/amplify-storage-utils.git@v1.5.2",
     "aiofiles",
     "pillow",
-    "gunicorn"
+    "gunicorn",
+    "redis>=5.0.0"
 ]
 
 [build-system]
