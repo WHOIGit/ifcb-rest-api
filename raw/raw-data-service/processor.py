@@ -13,9 +13,12 @@ from pydantic import BaseModel, Field
 
 from stateless_microservice import BaseProcessor, StatelessAction, render_bytes
 
-from .ifcb import IfcbDataDirectory, add_target, parse_target
+from .ifcb import AsyncIfcbDataDirectory, SyncIfcbDataDirectory
 from .ifcbhdr import parse_hdr_file
-from .ifcb_parsing import IfcbPidTransformer, list_roi_ids_from_s3
+from .s3utils import IfcbPidTransformer, list_roi_ids_from_s3
+from .ifcb_parsing import parse_target
+from .roistores import AsyncFilesystemRoiStore
+
 from storage.s3 import BucketStore
 from storage.utils import KeyTransformingStore, PrefixKeyTransformer
 from PIL import Image
@@ -62,9 +65,9 @@ class RawProcessor(BaseProcessor):
 
     def __init__(self):
         self.raw_data_dir = "/data/raw"  # Always mounted here in container
-        self._data_dir = IfcbDataDirectory(self.raw_data_dir)
+        self._data_dir = AsyncIfcbDataDirectory(self.raw_data_dir)
         # Metadata lookup does not require local .roi files
-        self._roi_meta_dir = IfcbDataDirectory(self.raw_data_dir, require_roi=False)
+        self._roi_meta_dir = AsyncIfcbDataDirectory(self.raw_data_dir, require_roi=False)
 
         self.roi_backend = os.getenv("ROI_BACKEND", "s3").lower()
 
@@ -111,7 +114,8 @@ class RawProcessor(BaseProcessor):
             self.roi_store = KeyTransformingStore(prefix_store, ifcb_transformer)
         else:
             # Legacy filesystem ROI access
-            self._roi_fs_dir = IfcbDataDirectory(self.raw_data_dir)
+            self._roi_store = AsyncFilesystemRoiStore(self.raw_data_dir)
+            self._roi_fs_dir = AsyncIfcbDataDirectory(self.raw_data_dir)
 
     @property
     def name(self) -> str:
@@ -188,7 +192,7 @@ class RawProcessor(BaseProcessor):
 
         ]
 
-    def data_directory(self) -> IfcbDataDirectory:
+    def data_directory(self) -> AsyncIfcbDataDirectory:
         return self._data_dir
     
     async def raw_data_paths(self, bin_id: str):
