@@ -81,6 +81,7 @@ class RawProcessor(BaseProcessor):
             self.capacity_groups = default_groups
 
         self.capacity_retry_after = int(os.getenv("CAPACITY_RETRY_AFTER", "1"))
+        self.capacity_key_ttl = int(os.getenv("CAPACITY_KEY_TTL", "30"))
 
         self.roi_backend = os.getenv("ROI_BACKEND", "s3").lower()
 
@@ -227,7 +228,7 @@ class RawProcessor(BaseProcessor):
             # Atomically increment counter
             new_count = await redis_client.incr(redis_key)
             # Set TTL as safety net (in case of crashes)
-            await redis_client.expire(redis_key, 30)
+            await redis_client.expire(redis_key, self.capacity_key_ttl)
 
             if new_count > max_concurrent:
                 # Over capacity - rollback and reject

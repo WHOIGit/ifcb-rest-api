@@ -15,10 +15,11 @@ logger = logging.getLogger(__name__)
 class GlobalCapacityMiddleware:
     """ASGI middleware for global capacity limiting. Runs before auth."""
 
-    def __init__(self, app, max_concurrent: int = 100, retry_after: int = 1):
+    def __init__(self, app, max_concurrent: int = 100, retry_after: int = 1, key_ttl: int = 30):
         self.app = app
         self.max_concurrent = max_concurrent
         self.retry_after = retry_after
+        self.key_ttl = key_ttl
         self.redis_key = "ifcb_raw:capacity:global"
 
     async def __call__(self, scope, receive, send):
@@ -36,7 +37,7 @@ class GlobalCapacityMiddleware:
 
         try:
             new_count = await redis_client.incr(self.redis_key)
-            await redis_client.expire(self.redis_key, 30)
+            await redis_client.expire(self.redis_key, self.key_ttl)
 
             if new_count > self.max_concurrent:
                 await redis_client.decr(self.redis_key)
@@ -131,4 +132,5 @@ app = create_app(RawProcessor(), config, auth_client=auth_client)
 # Global capacity ceiling - runs before auth, prevents connection errors
 global_capacity = int(os.getenv("GLOBAL_CAPACITY_LIMIT", "100"))
 retry_after = int(os.getenv("CAPACITY_RETRY_AFTER", "1"))
-app = GlobalCapacityMiddleware(app, max_concurrent=global_capacity, retry_after=retry_after)
+key_ttl = int(os.getenv("CAPACITY_KEY_TTL", "30"))
+app = GlobalCapacityMiddleware(app, max_concurrent=global_capacity, retry_after=retry_after, key_ttl=key_ttl)
