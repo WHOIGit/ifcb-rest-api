@@ -217,26 +217,22 @@ class RawProcessor(BaseProcessor):
         redis_client = await get_redis_client()
         if redis_client is None:
             # No Redis configured, pass through without limiting
-            logger.debug(f"[CAPACITY:{group}] Redis unavailable, passing through")
             yield
             return
 
         redis_key = f"ifcb_raw:capacity:{group}"
         acquired = False
-        current_count = 0
 
         try:
             # Atomically increment counter
-            current_count = await redis_client.incr(redis_key)
+            new_count = await redis_client.incr(redis_key)
             # Set TTL as safety net (in case of crashes)
             await redis_client.expire(redis_key, 30)
 
-            logger.debug(f"[CAPACITY:{group}] count: {current_count}/{max_concurrent}")
-
-            if current_count > max_concurrent:
+            if new_count > max_concurrent:
                 # Over capacity - rollback and reject
                 await redis_client.decr(redis_key)
-                logger.warning(f"[CAPACITY:{group}] EXCEEDED: {current_count}/{max_concurrent} - returning 429")
+                logger.warning(f"[CAPACITY] Group '{group}' exceeded: {new_count}/{max_concurrent} - returning 429")
                 raise HTTPException(
                     status_code=429,
                     detail={"error": "Too many concurrent requests", "group": group, "limit": max_concurrent},
@@ -247,7 +243,7 @@ class RawProcessor(BaseProcessor):
             yield
 
         except redis.RedisError as e:
-            logger.error(f"[CAPACITY:{group}] Redis error (count was {current_count}): {e}")
+            logger.error(f"[CAPACITY] Redis error: {e}")
             raise HTTPException(
                 status_code=503,
                 detail={"error": "Service temporarily unavailable"},
@@ -257,10 +253,9 @@ class RawProcessor(BaseProcessor):
         finally:
             if acquired and redis_client:
                 try:
-                    new_count = await redis_client.decr(redis_key)
-                    logger.debug(f"[CAPACITY:{group}] complete - count now: {new_count}")
+                    await redis_client.decr(redis_key)
                 except redis.RedisError as e:
-                    logger.error(f"[CAPACITY:{group}] Failed to decrement (count was {current_count}): {e}")
+                    logger.error(f"[CAPACITY] Failed to decrement counter for group '{group}': {e}")
 
     async def raw_data_paths(self, bin_id: str):
         dd = self.data_directory()

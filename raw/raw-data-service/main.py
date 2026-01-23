@@ -1,7 +1,6 @@
 """FastAPI entrypoint for the IFCB raw data service."""
 import logging
 import os
-import traceback
 
 import redis.asyncio as redis
 
@@ -9,13 +8,6 @@ from stateless_microservice import ServiceConfig, create_app, AuthClient
 
 from .processor import RawProcessor
 from .redis_client import get_redis_client
-
-# Configure logging from environment
-log_level = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=getattr(logging, log_level, logging.INFO),
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-)
 
 logger = logging.getLogger(__name__)
 
@@ -34,30 +26,21 @@ class GlobalCapacityMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # Extract request info for logging
-        path = scope.get("path", "unknown")
-        method = scope.get("method", "unknown")
-        request_id = f"{method} {path}"
-
         redis_client = await get_redis_client()
         if redis_client is None:
-            logger.debug(f"[GLOBAL CAPACITY] Redis unavailable, passing through: {request_id}")
             await self.app(scope, receive, send)
             return
 
         acquired = False
-        current_count = 0
         response_started = False
 
         try:
-            current_count = await redis_client.incr(self.redis_key)
+            new_count = await redis_client.incr(self.redis_key)
             await redis_client.expire(self.redis_key, 30)
 
-            logger.debug(f"[GLOBAL CAPACITY] {request_id} - count: {current_count}/{self.max_concurrent}")
-
-            if current_count > self.max_concurrent:
+            if new_count > self.max_concurrent:
                 await redis_client.decr(self.redis_key)
-                logger.warning(f"[GLOBAL CAPACITY] EXCEEDED: {current_count}/{self.max_concurrent} - returning 429 for {request_id}")
+                logger.warning(f"[GLOBAL CAPACITY] EXCEEDED: {new_count}/{self.max_concurrent} - returning 429")
                 await self._send_429(send)
                 return
 
@@ -73,29 +56,23 @@ class GlobalCapacityMiddleware:
             await self.app(scope, receive, tracked_send)
 
         except redis.RedisError as e:
-            logger.error(f"[GLOBAL CAPACITY] Redis error for {request_id}: {e}")
+            logger.error(f"[GLOBAL CAPACITY] Redis error: {e}")
             if not response_started:
                 await self._send_503(send)
             return
 
         except Exception as e:
-            # Catch-all for any unexpected exceptions to prevent connection drops
-            logger.error(
-                f"[GLOBAL CAPACITY] Unexpected error for {request_id} "
-                f"(count was {current_count}/{self.max_concurrent}): {type(e).__name__}: {e}\n"
-                f"{traceback.format_exc()}"
-            )
+            # Catch-all for unexpected exceptions to prevent connection drops
+            logger.exception(f"[GLOBAL CAPACITY] Unexpected error: {e}")
             if not response_started:
                 await self._send_500(send, str(e))
-            # Don't re-raise - we've handled it by sending an error response
 
         finally:
             if acquired and redis_client:
                 try:
-                    new_count = await redis_client.decr(self.redis_key)
-                    logger.debug(f"[GLOBAL CAPACITY] {request_id} complete - count now: {new_count}")
+                    await redis_client.decr(self.redis_key)
                 except redis.RedisError as e:
-                    logger.error(f"[GLOBAL CAPACITY] Failed to decrement for {request_id}: {e}")
+                    logger.error(f"[GLOBAL CAPACITY] Failed to decrement: {e}")
 
     async def _send_429(self, send):
         await send({
