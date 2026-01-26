@@ -80,6 +80,22 @@ class RawProcessor(BaseProcessor):
         else:
             self.capacity_groups = default_groups
 
+        # Endpoint to capacity group mapping
+        # Can be overridden via ENDPOINT_CAPACITY_MAP env var as JSON
+        default_endpoint_map = {
+            "raw-file": "fast",
+            "raw-archive-file": "slow",
+            "roi-ids": "fast",
+            "metadata": "fast",
+            "roi-image": "fast",
+            "roi-archive": "slow",
+        }
+        endpoint_map_json = os.getenv("ENDPOINT_CAPACITY_MAP")
+        if endpoint_map_json:
+            self.endpoint_capacity_map = json.loads(endpoint_map_json)
+        else:
+            self.endpoint_capacity_map = default_endpoint_map
+
         self.capacity_retry_after = int(os.getenv("CAPACITY_RETRY_AFTER", "1"))
         self.capacity_key_ttl = int(os.getenv("CAPACITY_KEY_TTL", "30"))
 
@@ -264,7 +280,7 @@ class RawProcessor(BaseProcessor):
     
     async def handle_raw_file_request(self, path_params: RawBinParams, token_info=None):
         """ Retrieve raw IFCB files. """
-        async with self.capacity_limit("fast"):
+        async with self.capacity_limit(self.endpoint_capacity_map["raw-file"]):
             if path_params.extension == "adc":
                 require_adc = True
                 require_roi = False
@@ -293,7 +309,7 @@ class RawProcessor(BaseProcessor):
 
     async def handle_raw_archive_file_request(self, path_params: RawBinArchiveParams, token_info=None):
         """ Retrieve raw IFCB files in a zip or tar/gzip archive. """
-        async with self.capacity_limit("slow"):
+        async with self.capacity_limit(self.endpoint_capacity_map["raw-archive-file"]):
             if path_params.extension == "zip":
                 media_type = "application/zip"
             elif path_params.extension == "tgz":
@@ -320,7 +336,7 @@ class RawProcessor(BaseProcessor):
 
     async def handle_roi_list_request(self, path_params: BinIDParams, token_info=None):
         """ Retrieve list of ROI IDs associated with the bin. """
-        async with self.capacity_limit("fast"):
+        async with self.capacity_limit(self.endpoint_capacity_map["roi-ids"]):
             pid = path_params.bin_id
             dd = self._roi_meta_dir
 
@@ -347,7 +363,7 @@ class RawProcessor(BaseProcessor):
 
     async def handle_roi_image_request(self, path_params: ROIImageParams, token_info=None):
         """ Retrieve a specific ROI image. """
-        async with self.capacity_limit("fast"):
+        async with self.capacity_limit(self.endpoint_capacity_map["roi-image"]):
             roi_id = path_params.roi_id
             media_type = {
                 "png": "image/png",
@@ -387,7 +403,7 @@ class RawProcessor(BaseProcessor):
 
     async def handle_metadata_request(self, path_params: BinIDParams, token_info=None):
         """ Retrieve metadata from the header file. """
-        async with self.capacity_limit("fast"):
+        async with self.capacity_limit(self.endpoint_capacity_map["metadata"]):
             try:
                 paths = await self.raw_data_paths(path_params.bin_id)
             except KeyError:
@@ -398,7 +414,7 @@ class RawProcessor(BaseProcessor):
 
     async def handle_roi_archive_request(self, path_params: ROIArchiveParams, token_info=None):
         """ Retrieve a tar/zip archive of ROI images for a given bin. """
-        async with self.capacity_limit("slow"):
+        async with self.capacity_limit(self.endpoint_capacity_map["roi-archive"]):
             dd = self._roi_meta_dir
             pid = path_params.bin_id
             roi_ids = []
