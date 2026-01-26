@@ -19,4 +19,4 @@ WORKDIR /app/service
 
 RUN uv pip install --system .
 
-CMD ["sh", "-c", "gunicorn raw-data-service.main:app --workers 8 --worker-class uvicorn.workers.UvicornWorker --backlog 8192 --bind 0.0.0.0:${PORT:-8001} --timeout 120"]
+CMD ["sh", "-c", "gunicorn raw-data-service.main:app --workers ${GUNICORN_WORKERS:-8} --worker-class uvicorn.workers.UvicornWorker --backlog 8192 --bind 0.0.0.0:${PORT:-8001} --timeout ${GUNICORN_TIMEOUT:-120}"]
