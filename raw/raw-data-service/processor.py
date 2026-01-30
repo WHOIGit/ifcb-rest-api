@@ -27,20 +27,16 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-def capacity_limited(endpoint_or_group: str):
+CAPACITY_FAST = "fast"
+CAPACITY_SLOW = "slow"
+
+def capacity_limited(group: str):
     """
     Decorate an async handler method to run under `self.capacity_limit(...)`.
-    `endpoint_or_group` can be:
-      - a StatelessAction name (e.g. "raw-file" or "raw_file")
-      - a capacity group name (e.g. "fast", "slow")
     """
-    key = endpoint_or_group.replace("_", "-")
-
     def decorator(fn):
         @functools.wraps(fn)
         async def wrapper(self, *args, **kwargs):
-            endpoint_map = getattr(self, "endpoint_capacity_map", {}) or {}
-            group = endpoint_map.get(key, key)
             async with self.capacity_limit(group):
                 return await fn(self, *args, **kwargs)
 
@@ -100,22 +96,6 @@ class RawProcessor(BaseProcessor):
             self.capacity_groups = json.loads(groups_json)
         else:
             self.capacity_groups = default_groups
-
-        # Endpoint to capacity group mapping
-        # Can be overridden via ENDPOINT_CAPACITY_MAP env var as JSON
-        default_endpoint_map = {
-            "raw-file": "fast",
-            "raw-archive-file": "slow",
-            "roi-ids": "fast",
-            "metadata": "fast",
-            "roi-image": "fast",
-            "roi-archive": "slow",
-        }
-        endpoint_map_json = os.getenv("ENDPOINT_CAPACITY_MAP")
-        if endpoint_map_json:
-            self.endpoint_capacity_map = json.loads(endpoint_map_json)
-        else:
-            self.endpoint_capacity_map = default_endpoint_map
 
         self.capacity_retry_after = int(os.getenv("CAPACITY_RETRY_AFTER", "1"))
         self.capacity_key_ttl = int(os.getenv("CAPACITY_KEY_TTL", "30"))
@@ -299,7 +279,7 @@ class RawProcessor(BaseProcessor):
         dd = self.data_directory()
         return await dd.paths(bin_id)
     
-    @capacity_limited("raw-file")
+    @capacity_limited(CAPACITY_FAST)
     async def handle_raw_file_request(self, path_params: RawBinParams, token_info=None):
         """ Retrieve raw IFCB files. """
         if path_params.extension == "adc":
@@ -328,7 +308,7 @@ class RawProcessor(BaseProcessor):
         }[path_params.extension]
         return render_bytes(content, media_type)
 
-    @capacity_limited("raw-archive-file")
+    @capacity_limited(CAPACITY_SLOW)
     async def handle_raw_archive_file_request(self, path_params: RawBinArchiveParams, token_info=None):
         """ Retrieve raw IFCB files in a zip or tar/gzip archive. """
         if path_params.extension == "zip":
@@ -354,7 +334,7 @@ class RawProcessor(BaseProcessor):
         buffer.seek(0)
         return render_bytes(buffer.getvalue(), media_type)
 
-    @capacity_limited("roi-ids")
+    @capacity_limited(CAPACITY_FAST)
     async def handle_roi_list_request(self, path_params: BinIDParams, token_info=None):
         """ Retrieve list of ROI IDs associated with the bin. """
         pid = path_params.bin_id
@@ -381,7 +361,7 @@ class RawProcessor(BaseProcessor):
         image_list = await dd.list_images(pid)
         return image_list
 
-    @capacity_limited("roi-image")
+    @capacity_limited(CAPACITY_FAST)
     async def handle_roi_image_request(self, path_params: ROIImageParams, token_info=None):
         """ Retrieve a specific ROI image. """
         roi_id = path_params.roi_id
@@ -421,7 +401,7 @@ class RawProcessor(BaseProcessor):
         img_buffer.seek(0)
         return render_bytes(img_buffer.getvalue(), media_type)
 
-    @capacity_limited("metadata")
+    @capacity_limited(CAPACITY_FAST)
     async def handle_metadata_request(self, path_params: BinIDParams, token_info=None):
         """ Retrieve metadata from the header file. """
         try:
@@ -432,7 +412,7 @@ class RawProcessor(BaseProcessor):
         props = await asyncio.to_thread(parse_hdr_file, hdr_path)
         return props
 
-    @capacity_limited("roi-archive")
+    @capacity_limited(CAPACITY_SLOW)
     async def handle_roi_archive_request(self, path_params: ROIArchiveParams, token_info=None):
         """ Retrieve a tar/zip archive of ROI images for a given bin. """
         dd = self._roi_meta_dir
