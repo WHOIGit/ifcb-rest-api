@@ -1,6 +1,7 @@
 """Stateless template processor."""
 import asyncio
 from contextlib import asynccontextmanager
+import functools
 from io import BytesIO
 import json
 import logging
@@ -26,6 +27,22 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
+CAPACITY_FAST = "fast"
+CAPACITY_SLOW = "slow"
+
+def capacity_limited(group: str):
+    """
+    Decorate an async handler method to run under `self.capacity_limit(...)`.
+    """
+    def decorator(fn):
+        @functools.wraps(fn)
+        async def wrapper(self, *args, **kwargs):
+            async with self.capacity_limit(group):
+                return await fn(self, *args, **kwargs)
+
+        return wrapper
+
+    return decorator
 
 class RawBinParams(BaseModel):
     """ Path parameters for the raw_file endpoint. """
@@ -79,22 +96,6 @@ class RawProcessor(BaseProcessor):
             self.capacity_groups = json.loads(groups_json)
         else:
             self.capacity_groups = default_groups
-
-        # Endpoint to capacity group mapping
-        # Can be overridden via ENDPOINT_CAPACITY_MAP env var as JSON
-        default_endpoint_map = {
-            "raw-file": "fast",
-            "raw-archive-file": "slow",
-            "roi-ids": "fast",
-            "metadata": "fast",
-            "roi-image": "fast",
-            "roi-archive": "slow",
-        }
-        endpoint_map_json = os.getenv("ENDPOINT_CAPACITY_MAP")
-        if endpoint_map_json:
-            self.endpoint_capacity_map = json.loads(endpoint_map_json)
-        else:
-            self.endpoint_capacity_map = default_endpoint_map
 
         self.capacity_retry_after = int(os.getenv("CAPACITY_RETRY_AFTER", "1"))
         self.capacity_key_ttl = int(os.getenv("CAPACITY_KEY_TTL", "30"))
@@ -278,246 +279,245 @@ class RawProcessor(BaseProcessor):
         dd = self.data_directory()
         return await dd.paths(bin_id)
     
+    @capacity_limited(CAPACITY_FAST)
     async def handle_raw_file_request(self, path_params: RawBinParams, token_info=None):
         """ Retrieve raw IFCB files. """
-        async with self.capacity_limit(self.endpoint_capacity_map["raw-file"]):
-            if path_params.extension == "adc":
-                require_adc = True
-                require_roi = False
-            elif path_params.extension == "roi":
-                require_adc = True
-                require_roi = True
-            else:
-                require_adc = False
-                require_roi = False
-            try:
-                paths = await self.raw_data_paths(path_params.bin_id)
-            except KeyError:
-                raise HTTPException(status_code=404, detail=f"Bin ID {path_params.bin_id} not found.")
-            path = paths.get(path_params.extension)
-            if path is None:
-                raise FileNotFoundError(f"No file with extension {path_params.extension} for bin {path_params.bin_id}")
-            # read file contents from path
-            async with aiofiles.open(path, mode='rb') as f:
-                content = await f.read()
-            media_type = {
-                "hdr": "text/plain",
-                "adc": "text/csv",
-                "roi": "application/octet-stream",
-            }[path_params.extension]
-            return render_bytes(content, media_type)
+        if path_params.extension == "adc":
+            require_adc = True
+            require_roi = False
+        elif path_params.extension == "roi":
+            require_adc = True
+            require_roi = True
+        else:
+            require_adc = False
+            require_roi = False
+        try:
+            paths = await self.raw_data_paths(path_params.bin_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"Bin ID {path_params.bin_id} not found.")
+        path = paths.get(path_params.extension)
+        if path is None:
+            raise FileNotFoundError(f"No file with extension {path_params.extension} for bin {path_params.bin_id}")
+        # read file contents from path
+        async with aiofiles.open(path, mode='rb') as f:
+            content = await f.read()
+        media_type = {
+            "hdr": "text/plain",
+            "adc": "text/csv",
+            "roi": "application/octet-stream",
+        }[path_params.extension]
+        return render_bytes(content, media_type)
 
+    @capacity_limited(CAPACITY_SLOW)
     async def handle_raw_archive_file_request(self, path_params: RawBinArchiveParams, token_info=None):
         """ Retrieve raw IFCB files in a zip or tar/gzip archive. """
-        async with self.capacity_limit(self.endpoint_capacity_map["raw-archive-file"]):
-            if path_params.extension == "zip":
-                media_type = "application/zip"
-            elif path_params.extension == "tgz":
-                media_type = "application/gzip"
+        if path_params.extension == "zip":
+            media_type = "application/zip"
+        elif path_params.extension == "tgz":
+            media_type = "application/gzip"
 
-            paths = await self.raw_data_paths(path_params.bin_id)
+        paths = await self.raw_data_paths(path_params.bin_id)
 
-            buffer = BytesIO()
+        buffer = BytesIO()
 
-            if path_params.extension == "zip":
-                import zipfile
-                with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
-                    for ext, path in paths.items():
-                        await asyncio.to_thread(zipf.write, path, arcname=f"{path_params.bin_id}.{ext}")
-            elif path_params.extension == "tgz":
-                import tarfile
-                with tarfile.open(fileobj=buffer, mode='w:gz') as tarf:
-                    for ext, path in paths.items():
-                        await asyncio.to_thread(tarf.add, path, arcname=f"{path_params.bin_id}.{ext}")
+        if path_params.extension == "zip":
+            import zipfile
+            with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
+                for ext, path in paths.items():
+                    await asyncio.to_thread(zipf.write, path, arcname=f"{path_params.bin_id}.{ext}")
+        elif path_params.extension == "tgz":
+            import tarfile
+            with tarfile.open(fileobj=buffer, mode='w:gz') as tarf:
+                for ext, path in paths.items():
+                    await asyncio.to_thread(tarf.add, path, arcname=f"{path_params.bin_id}.{ext}")
 
-            buffer.seek(0)
+        buffer.seek(0)
+        return render_bytes(buffer.getvalue(), media_type)
 
-            return render_bytes(buffer.getvalue(), media_type)
-
+    @capacity_limited(CAPACITY_FAST)
     async def handle_roi_list_request(self, path_params: BinIDParams, token_info=None):
         """ Retrieve list of ROI IDs associated with the bin. """
-        async with self.capacity_limit(self.endpoint_capacity_map["roi-ids"]):
-            pid = path_params.bin_id
-            dd = self._roi_meta_dir
+        pid = path_params.bin_id
+        dd = self._roi_meta_dir
 
-            if self.roi_backend == "s3":
-                # List ROIs available in S3
-                roi_ids_in_s3 = await asyncio.to_thread(list_roi_ids_from_s3, self.bucket_store, pid, self.s3_prefix)
-                if not roi_ids_in_s3:
-                    raise HTTPException(status_code=404, detail=f"Bin ID {pid} not found.")
+        if self.roi_backend == "s3":
+            # List ROIs available in S3
+            roi_ids_in_s3 = await asyncio.to_thread(list_roi_ids_from_s3, self.bucket_store, pid, self.s3_prefix)
+            if not roi_ids_in_s3:
+                raise HTTPException(status_code=404, detail=f"Bin ID {pid} not found.")
 
-                # Get full metadata from ADC file (always available locally)
-                image_list = await dd.list_images(pid)
-
-                # Filter to only include ROIs that exist in S3
-                roi_ids_set = set(roi_ids_in_s3)
-                filtered_images = {
-                    idx: metadata
-                    for idx, metadata in image_list.items()
-                    if metadata['roi_id'] in roi_ids_set
-                }
-                return filtered_images
-
+            # Get full metadata from ADC file (always available locally)
             image_list = await dd.list_images(pid)
-            return image_list
 
+            # Filter to only include ROIs that exist in S3
+            roi_ids_set = set(roi_ids_in_s3)
+            filtered_images = {
+                idx: metadata
+                for idx, metadata in image_list.items()
+                if metadata['roi_id'] in roi_ids_set
+            }
+            return filtered_images
+
+        image_list = await dd.list_images(pid)
+        return image_list
+
+    @capacity_limited(CAPACITY_FAST)
     async def handle_roi_image_request(self, path_params: ROIImageParams, token_info=None):
         """ Retrieve a specific ROI image. """
-        async with self.capacity_limit(self.endpoint_capacity_map["roi-image"]):
-            roi_id = path_params.roi_id
-            media_type = {
-                "png": "image/png",
-                "jpg": "image/jpeg",
-            }[path_params.extension]
+        roi_id = path_params.roi_id
+        media_type = {
+            "png": "image/png",
+            "jpg": "image/jpeg",
+        }[path_params.extension]
 
-            if self.roi_backend == "s3":
-                exists = await asyncio.to_thread(self.roi_store.exists, roi_id)
-                if not exists:
-                    raise HTTPException(status_code=404, detail=f"ROI ID {roi_id} not found.")
-
-                png_bytes = await asyncio.to_thread(self.roi_store.get, roi_id)
-
-                if path_params.extension == "png":
-                    return render_bytes(png_bytes, media_type, headers={'Expires': 'Fri, 01 Jan 2038 00:00:00 GMT'})
-
-                img_buffer = BytesIO()
-                image = Image.open(BytesIO(png_bytes))
-                await asyncio.to_thread(image.convert("RGB").save, img_buffer, format="JPEG")
-                img_buffer.seek(0)
-                return render_bytes(img_buffer.getvalue(), media_type, headers={'Expires': 'Fri, 01 Jan 2038 00:00:00 GMT'})
-
-            # Legacy filesystem ROI retrieval
-            pid, target = parse_target(roi_id)
-            images = await self._roi_fs_dir.read_images(pid, rois=[target])
-            image = images.get(target)
-            if image is None:
+        if self.roi_backend == "s3":
+            exists = await asyncio.to_thread(self.roi_store.exists, roi_id)
+            if not exists:
                 raise HTTPException(status_code=404, detail=f"ROI ID {roi_id} not found.")
-            img_buffer = BytesIO()
-            format = {
-                "png": "PNG",
-                "jpg": "JPEG",
-            }[path_params.extension]
-            await asyncio.to_thread(image.save, img_buffer, format=format)
-            img_buffer.seek(0)
-            return render_bytes(img_buffer.getvalue(), media_type)
 
+            png_bytes = await asyncio.to_thread(self.roi_store.get, roi_id)
+
+            if path_params.extension == "png":
+                return render_bytes(png_bytes, media_type, headers={'Expires': 'Fri, 01 Jan 2038 00:00:00 GMT'})
+
+            img_buffer = BytesIO()
+            image = Image.open(BytesIO(png_bytes))
+            await asyncio.to_thread(image.convert("RGB").save, img_buffer, format="JPEG")
+            img_buffer.seek(0)
+            return render_bytes(img_buffer.getvalue(), media_type, headers={'Expires': 'Fri, 01 Jan 2038 00:00:00 GMT'})
+
+        # Legacy filesystem ROI retrieval
+        pid, target = parse_target(roi_id)
+        images = await self._roi_fs_dir.read_images(pid, rois=[target])
+        image = images.get(target)
+        if image is None:
+            raise HTTPException(status_code=404, detail=f"ROI ID {roi_id} not found.")
+        img_buffer = BytesIO()
+        format = {
+            "png": "PNG",
+            "jpg": "JPEG",
+        }[path_params.extension]
+        await asyncio.to_thread(image.save, img_buffer, format=format)
+        img_buffer.seek(0)
+        return render_bytes(img_buffer.getvalue(), media_type)
+
+    @capacity_limited(CAPACITY_FAST)
     async def handle_metadata_request(self, path_params: BinIDParams, token_info=None):
         """ Retrieve metadata from the header file. """
-        async with self.capacity_limit(self.endpoint_capacity_map["metadata"]):
-            try:
-                paths = await self.raw_data_paths(path_params.bin_id)
-            except KeyError:
-                raise HTTPException(status_code=404, detail=f"Bin ID {path_params.bin_id} not found.")
-            hdr_path = paths.get("hdr")
-            props = await asyncio.to_thread(parse_hdr_file, hdr_path)
-            return props
+        try:
+            paths = await self.raw_data_paths(path_params.bin_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"Bin ID {path_params.bin_id} not found.")
+        hdr_path = paths.get("hdr")
+        props = await asyncio.to_thread(parse_hdr_file, hdr_path)
+        return props
 
+    @capacity_limited(CAPACITY_SLOW)
     async def handle_roi_archive_request(self, path_params: ROIArchiveParams, token_info=None):
         """ Retrieve a tar/zip archive of ROI images for a given bin. """
-        async with self.capacity_limit(self.endpoint_capacity_map["roi-archive"]):
-            dd = self._roi_meta_dir
-            pid = path_params.bin_id
-            roi_ids = []
-            if self.roi_backend == "s3":
-                roi_ids = await asyncio.to_thread(list_roi_ids_from_s3, self.bucket_store, pid, self.s3_prefix)
-                if not roi_ids:
-                    raise HTTPException(status_code=404, detail=f"Bin ID {pid} not found.")
-            else:
-                images = await dd.list_images(pid)
-                roi_ids = [img["roi_id"] for img in images.values()]
-            fs_images = None
-            if self.roi_backend == "fs":
-                fs_images = await self._roi_fs_dir.read_images(pid)
+        dd = self._roi_meta_dir
+        pid = path_params.bin_id
+        roi_ids = []
+        if self.roi_backend == "s3":
+            roi_ids = await asyncio.to_thread(list_roi_ids_from_s3, self.bucket_store, pid, self.s3_prefix)
+            if not roi_ids:
+                raise HTTPException(status_code=404, detail=f"Bin ID {pid} not found.")
+        else:
+            images = await dd.list_images(pid)
+            roi_ids = [img["roi_id"] for img in images.values()]
+        fs_images = None
+        if self.roi_backend == "fs":
+            fs_images = await self._roi_fs_dir.read_images(pid)
 
-            def format_image(image):
-                img_buffer = BytesIO()
-                image.save(img_buffer, format="PNG")
-                img_buffer.seek(0)
-                return img_buffer.getvalue()
+        def format_image(image):
+            img_buffer = BytesIO()
+            image.save(img_buffer, format="PNG")
+            img_buffer.seek(0)
+            return img_buffer.getvalue()
 
-            async def fetch_roi_batch(batch_roi_ids):
-                """Fetch a batch of ROIs from S3 concurrently."""
-                tasks = [asyncio.to_thread(self.roi_store.get, roi_id) for roi_id in batch_roi_ids]
-                return await asyncio.gather(*tasks)
+        async def fetch_roi_batch(batch_roi_ids):
+            """Fetch a batch of ROIs from S3 concurrently."""
+            tasks = [asyncio.to_thread(self.roi_store.get, roi_id) for roi_id in batch_roi_ids]
+            return await asyncio.gather(*tasks)
 
-            buffer = BytesIO()
-            if path_params.extension == "zip":
-                import zipfile
-                files_added = 0
-                with zipfile.ZipFile(buffer, 'w') as zipf:
-                    if self.roi_backend == "s3":
-                        # Fetch and write ROIs in parallel batches
-                        for batch_start in range(0, len(roi_ids), self.s3_concurrent_requests):
-                            batch_end = min(batch_start + self.s3_concurrent_requests, len(roi_ids))
-                            batch_roi_ids = roi_ids[batch_start:batch_end]
+        buffer = BytesIO()
+        if path_params.extension == "zip":
+            import zipfile
+            files_added = 0
+            with zipfile.ZipFile(buffer, 'w') as zipf:
+                if self.roi_backend == "s3":
+                    # Fetch and write ROIs in parallel batches
+                    for batch_start in range(0, len(roi_ids), self.s3_concurrent_requests):
+                        batch_end = min(batch_start + self.s3_concurrent_requests, len(roi_ids))
+                        batch_roi_ids = roi_ids[batch_start:batch_end]
 
-                            # Fetch batch concurrently
-                            start_fetch = time.time()
-                            batch_images = await fetch_roi_batch(batch_roi_ids)
-                            fetch_time = time.time() - start_fetch
+                        # Fetch batch concurrently
+                        start_fetch = time.time()
+                        batch_images = await fetch_roi_batch(batch_roi_ids)
+                        fetch_time = time.time() - start_fetch
 
-                            # Write to zip
-                            start_write = time.time()
-                            for roi_id, image_bytes in zip(batch_roi_ids, batch_images):
-                                await asyncio.to_thread(zipf.writestr, f"{roi_id}.png", image_bytes)
-                                files_added += 1
-                            write_time = time.time() - start_write
+                        # Write to zip
+                        start_write = time.time()
+                        for roi_id, image_bytes in zip(batch_roi_ids, batch_images):
+                            await asyncio.to_thread(zipf.writestr, f"{roi_id}.png", image_bytes)
+                            files_added += 1
+                        write_time = time.time() - start_write
 
-                            if batch_end % 100 == 0 or batch_end == len(roi_ids):
-                                logger.info(f"Progress: {batch_end}/{len(roi_ids)} ROIs processed, {files_added} added to ZIP - fetch={fetch_time:.2f}s, write={write_time:.2f}s")
-                    else:
-                        # Filesystem backend (sequential)
-                        def zip_images():
-                            for idx, roi_id in enumerate(roi_ids):
-                                _, target = parse_target(roi_id)
-                                image = fs_images.get(target) if fs_images else None
-                                if image is None:
-                                    continue
-                                image_bytes = format_image(image)
-                                zipf.writestr(f"{roi_id}.png", image_bytes)
-                        await asyncio.to_thread(zip_images)
-            elif path_params.extension == "tar":
-                import tarfile
-                files_added = 0
-                with tarfile.open(fileobj=buffer, mode='w') as tarf:
-                    if self.roi_backend == "s3":
-                        # Fetch and write ROIs in parallel batches
-                        for batch_start in range(0, len(roi_ids), self.s3_concurrent_requests):
-                            batch_end = min(batch_start + self.s3_concurrent_requests, len(roi_ids))
-                            batch_roi_ids = roi_ids[batch_start:batch_end]
+                        if batch_end % 100 == 0 or batch_end == len(roi_ids):
+                            logger.info(f"Progress: {batch_end}/{len(roi_ids)} ROIs processed, {files_added} added to ZIP - fetch={fetch_time:.2f}s, write={write_time:.2f}s")
+                else:
+                    # Filesystem backend (sequential)
+                    def zip_images():
+                        for idx, roi_id in enumerate(roi_ids):
+                            _, target = parse_target(roi_id)
+                            image = fs_images.get(target) if fs_images else None
+                            if image is None:
+                                continue
+                            image_bytes = format_image(image)
+                            zipf.writestr(f"{roi_id}.png", image_bytes)
+                    await asyncio.to_thread(zip_images)
+        elif path_params.extension == "tar":
+            import tarfile
+            files_added = 0
+            with tarfile.open(fileobj=buffer, mode='w') as tarf:
+                if self.roi_backend == "s3":
+                    # Fetch and write ROIs in parallel batches
+                    for batch_start in range(0, len(roi_ids), self.s3_concurrent_requests):
+                        batch_end = min(batch_start + self.s3_concurrent_requests, len(roi_ids))
+                        batch_roi_ids = roi_ids[batch_start:batch_end]
 
-                            # Fetch batch concurrently
-                            start_fetch = time.time()
-                            batch_images = await fetch_roi_batch(batch_roi_ids)
-                            fetch_time = time.time() - start_fetch
+                        # Fetch batch concurrently
+                        start_fetch = time.time()
+                        batch_images = await fetch_roi_batch(batch_roi_ids)
+                        fetch_time = time.time() - start_fetch
 
-                            # Write to tar
-                            start_write = time.time()
-                            for roi_id, image_bytes in zip(batch_roi_ids, batch_images):
-                                info = tarfile.TarInfo(name=f"{roi_id}.png")
-                                info.size = len(image_bytes)
-                                await asyncio.to_thread(tarf.addfile, tarinfo=info, fileobj=BytesIO(image_bytes))
-                                files_added += 1
-                            write_time = time.time() - start_write
+                        # Write to tar
+                        start_write = time.time()
+                        for roi_id, image_bytes in zip(batch_roi_ids, batch_images):
+                            info = tarfile.TarInfo(name=f"{roi_id}.png")
+                            info.size = len(image_bytes)
+                            await asyncio.to_thread(tarf.addfile, tarinfo=info, fileobj=BytesIO(image_bytes))
+                            files_added += 1
+                        write_time = time.time() - start_write
 
-                            if batch_end % 100 == 0 or batch_end == len(roi_ids):
-                                logger.info(f"Progress: {batch_end}/{len(roi_ids)} ROIs processed, {files_added} added to TAR - fetch={fetch_time:.2f}s, write={write_time:.2f}s")
-                    else:
-                        # Filesystem backend (sequential)
-                        def tar_images():
-                            for idx, roi_id in enumerate(roi_ids):
-                                _, target = parse_target(roi_id)
-                                image = fs_images.get(target) if fs_images else None
-                                if image is None:
-                                    continue
-                                image_bytes = format_image(image)
-                                info = tarfile.TarInfo(name=f"{roi_id}.png")
-                                info.size = len(image_bytes)
-                                tarf.addfile(tarinfo=info, fileobj=BytesIO(image_bytes))
-                        await asyncio.to_thread(tar_images)
-            buffer.seek(0)
-            media_type = {
-                "zip": "application/zip",
-                "tar": "application/x-tar",
-            }[path_params.extension]
-            return render_bytes(buffer.getvalue(), media_type)
+                        if batch_end % 100 == 0 or batch_end == len(roi_ids):
+                            logger.info(f"Progress: {batch_end}/{len(roi_ids)} ROIs processed, {files_added} added to TAR - fetch={fetch_time:.2f}s, write={write_time:.2f}s")
+                else:
+                    # Filesystem backend (sequential)
+                    def tar_images():
+                        for idx, roi_id in enumerate(roi_ids):
+                            _, target = parse_target(roi_id)
+                            image = fs_images.get(target) if fs_images else None
+                            if image is None:
+                                continue
+                            image_bytes = format_image(image)
+                            info = tarfile.TarInfo(name=f"{roi_id}.png")
+                            info.size = len(image_bytes)
+                            tarf.addfile(tarinfo=info, fileobj=BytesIO(image_bytes))
+                    await asyncio.to_thread(tar_images)
+        buffer.seek(0)
+        media_type = {
+            "zip": "application/zip",
+            "tar": "application/x-tar",
+        }[path_params.extension]
+        return render_bytes(buffer.getvalue(), media_type)
