@@ -128,9 +128,9 @@ class RawProcessor(BaseProcessor):
                 endpoint_url=self.s3_endpoint,
                 aws_access_key_id=self.s3_access_key,
                 aws_secret_access_key=self.s3_secret_key,
-                config = {
-                    'max_pool_connections': self.s3_concurrent_requests
-                }
+                config = botocore.config.Config(
+                    max_pool_connections=self.s3_concurrent_requests
+                )
             )
 
             self.bucket_store = BucketStore(s3_client, self.s3_bucket)
