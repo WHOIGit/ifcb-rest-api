@@ -45,8 +45,7 @@ class SyncFilesystemRoiStore(SyncRoiStore):
         self.file_type = file_type
 
     def get(self, roi_id: str) -> bytes:
-        bin_id, target = parse_roi_id(roi_id)
-        image = self.dd.get_roi(bin_id, target)
+        image = self.dd.read_image(roi_id)
         image_data = BytesIO()
         if self.file_type == "jpg":
             image.save(image_data, format="JPEG")
@@ -57,7 +56,7 @@ class SyncFilesystemRoiStore(SyncRoiStore):
 
 class AsyncFilesystemRoiStore(AsyncRoiStore):
 
-    dd = AsyncIfcbDataDirectory
+    dd: AsyncIfcbDataDirectory
     file_type: str
 
     def __init__(self, base_path: str, file_type: str = "png"):
@@ -70,8 +69,7 @@ class AsyncFilesystemRoiStore(AsyncRoiStore):
         self.file_type = file_type
 
     async def get(self, roi_id: str) -> bytes:
-        bin_id, target = parse_roi_id(roi_id)
-        image = await self.dd.read_image(bin_id, target)
+        image = await self.dd.read_image(roi_id)
         image_data = BytesIO()
         if self.file_type == "jpg":
             image.save(image_data, format="JPEG")

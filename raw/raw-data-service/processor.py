@@ -394,19 +394,12 @@ class RawProcessor(BaseProcessor):
             return render_bytes(img_buffer.getvalue(), media_type, headers={'Expires': 'Fri, 01 Jan 2038 00:00:00 GMT'})
 
         # Legacy filesystem ROI retrieval
-        pid, target = parse_target(roi_id)
-        images = await self._roi_fs_dir.read_images(pid, rois=[target])
-        image = images.get(target)
-        if image is None:
+        roi_store = AsyncFilesystemRoiStore(self.raw_data_dir, file_type=path_params.extension)
+        try:
+            img_bytes = await roi_store.get(roi_id)
+        except FileNotFoundError:
             raise HTTPException(status_code=404, detail=f"ROI ID {roi_id} not found.")
-        img_buffer = BytesIO()
-        format = {
-            "png": "PNG",
-            "jpg": "JPEG",
-        }[path_params.extension]
-        await asyncio.to_thread(image.save, img_buffer, format=format)
-        img_buffer.seek(0)
-        return render_bytes(img_buffer.getvalue(), media_type)
+        return render_bytes(img_bytes, media_type)
 
     @capacity_limited(CAPACITY_FAST)
     async def handle_metadata_request(self, path_params: BinIDParams, token_info=None):
