@@ -11,6 +11,8 @@ import time
 from typing import List, Literal
 
 import aiofiles
+import boto3
+import botocore
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 import redis.asyncio as redis
@@ -120,17 +122,18 @@ class RawProcessor(BaseProcessor):
             if not self.s3_secret_key:
                 raise ValueError("S3_SECRET_KEY environment variable is required when ROI_BACKEND=s3")
 
-            # Create S3 bucket store with connection pool sized for concurrent requests
-            self.bucket_store = BucketStore(
-                s3_url=self.s3_endpoint,
-                s3_access_key=self.s3_access_key,
-                s3_secret_key=self.s3_secret_key,
-                bucket_name=self.s3_bucket,
-                botocore_config_kwargs={
-                    "max_pool_connections": self.s3_concurrent_requests
-                }
+            s3_session = boto3.session.Session()
+            s3_client = s3_session.client(
+                's3',
+                endpoint_url=self.s3_endpoint,
+                aws_access_key_id=self.s3_access_key,
+                aws_secret_access_key=self.s3_secret_key,
+                config = botocore.config.Config(
+                    max_pool_connections=self.s3_concurrent_requests
+                )
             )
-            self.bucket_store.__enter__()
+
+            self.bucket_store = BucketStore(self.s3_bucket, s3_client)
 
             # Compose transformers: first apply prefix, then IFCB-specific path structure
             # Inner layer: add S3 prefix (e.g., "ifcb_data/")
