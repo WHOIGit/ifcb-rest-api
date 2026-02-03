@@ -24,3 +24,29 @@ REST API for serving IFCB raw data files and ROI images.
 ### Optional Configuration
 
 - `PORT` - Optional, defaults to `8001`. Port for the service (both host and container)
+
+### Capacity Limiting
+
+Rate limits concurrent requests via Redis to prevent overload.
+
+- `REDIS_URL` - Redis connection URL (e.g., `redis://redis:6379/0`). Required for capacity limiting.
+- `GLOBAL_CAPACITY_LIMIT` - Max concurrent requests before auth. Default `100`.
+- `CAPACITY_GROUPS` - JSON config for per-endpoint group limits. Default `{"fast": 40, "slow": 5}`.
+- `CAPACITY_RETRY_AFTER` - Retry-After header value (seconds) on 429. Default `1`.
+- `CAPACITY_KEY_TTL` - Redis key TTL in seconds (crash recovery). Default `30`.
+
+- `ENDPOINT_CAPACITY_MAP` - JSON mapping endpoints to groups. Default:
+  ```json
+  {"raw-file": "fast", "raw-archive-file": "slow", "roi-ids": "fast", "metadata": "fast", "roi-image": "fast", "roi-archive": "slow"}
+  ```
+
+Example custom config with three groups:
+```bash
+CAPACITY_GROUPS='{"critical": 100, "standard": 40, "heavy": 5}'
+ENDPOINT_CAPACITY_MAP='{"roi-image": "critical", "raw-file": "standard", "metadata": "standard", "roi-ids": "standard", "raw-archive-file": "heavy", "roi-archive": "heavy"}'
+```
+
+### Gunicorn Configuration
+
+- `GUNICORN_WORKERS` - Number of worker processes. Default `50` (docker-compose) / `8` (Dockerfile).
+- `GUNICORN_TIMEOUT` - Worker timeout in seconds. Default `120`.

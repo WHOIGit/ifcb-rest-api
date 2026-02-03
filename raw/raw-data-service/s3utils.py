@@ -1,3 +1,6 @@
+from .ifcb_parsing import parse_roi_id
+
+
 def list_roi_ids_from_s3(bucket_store, bin_id: str, prefix: str = "") -> list:
     """List ROI IDs for a given bin from S3.
 
@@ -63,9 +66,7 @@ class IfcbPidTransformer:
         Returns:
             S3 key like '2025/D20250114T172241_IFCB109/00002.png'
         """
-        parsed = parse_ifcb_pid(pid)
-        bin_lid = parsed['bin_lid']
-        roi_number = parsed['target']
+        bin_lid, roi_number = parse_roi_id(pid)
 
         # Extract year from bin_lid
         if bin_lid.startswith("D") and len(bin_lid) >= 5:

@@ -1,6 +1,9 @@
 """Stateless template processor."""
 import asyncio
+from contextlib import asynccontextmanager
+import functools
 from io import BytesIO
+import json
 import logging
 import os
 import time
@@ -8,14 +11,18 @@ import time
 from typing import List, Literal
 
 import aiofiles
+import boto3
+import botocore
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
+import redis.asyncio as redis
 
 from stateless_microservice import BaseProcessor, StatelessAction, render_bytes
 
 from .ifcb import AsyncIfcbDataDirectory, SyncIfcbDataDirectory
 from .ifcbhdr import parse_hdr_file
 from .s3utils import IfcbPidTransformer, list_roi_ids_from_s3
+from .redis_client import get_redis_client
 from .ifcb_parsing import parse_target
 from .roistores import AsyncFilesystemRoiStore
 
@@ -25,6 +32,22 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
+CAPACITY_FAST = "fast"
+CAPACITY_SLOW = "slow"
+
+def capacity_limited(group: str):
+    """
+    Decorate an async handler method to run under `self.capacity_limit(...)`.
+    """
+    def decorator(fn):
+        @functools.wraps(fn)
+        async def wrapper(self, *args, **kwargs):
+            async with self.capacity_limit(group):
+                return await fn(self, *args, **kwargs)
+
+        return wrapper
+
+    return decorator
 
 class RawBinParams(BaseModel):
     """ Path parameters for the raw_file endpoint. """
@@ -69,6 +92,19 @@ class RawProcessor(BaseProcessor):
         # Metadata lookup does not require local .roi files
         self._roi_meta_dir = AsyncIfcbDataDirectory(self.raw_data_dir, require_roi=False)
 
+        # Capacity groups configuration
+        # Can be overridden via CAPACITY_GROUPS env var as JSON
+        # e.g. '{"fast": 40, "slow": 5}'
+        default_groups = {"fast": 40, "slow": 5}
+        groups_json = os.getenv("CAPACITY_GROUPS")
+        if groups_json:
+            self.capacity_groups = json.loads(groups_json)
+        else:
+            self.capacity_groups = default_groups
+
+        self.capacity_retry_after = int(os.getenv("CAPACITY_RETRY_AFTER", "1"))
+        self.capacity_key_ttl = int(os.getenv("CAPACITY_KEY_TTL", "30"))
+
         self.roi_backend = os.getenv("ROI_BACKEND", "s3").lower()
 
         if self.roi_backend not in ("s3", "fs"):
@@ -89,17 +125,18 @@ class RawProcessor(BaseProcessor):
             if not self.s3_secret_key:
                 raise ValueError("S3_SECRET_KEY environment variable is required when ROI_BACKEND=s3")
 
-            # Create S3 bucket store with connection pool sized for concurrent requests
-            self.bucket_store = BucketStore(
-                s3_url=self.s3_endpoint,
-                s3_access_key=self.s3_access_key,
-                s3_secret_key=self.s3_secret_key,
-                bucket_name=self.s3_bucket,
-                botocore_config_kwargs={
-                    "max_pool_connections": self.s3_concurrent_requests
-                }
+            s3_session = boto3.session.Session()
+            s3_client = s3_session.client(
+                's3',
+                endpoint_url=self.s3_endpoint,
+                aws_access_key_id=self.s3_access_key,
+                aws_secret_access_key=self.s3_secret_key,
+                config = botocore.config.Config(
+                    max_pool_connections=self.s3_concurrent_requests
+                )
             )
-            self.bucket_store.__enter__()
+
+            self.bucket_store = BucketStore(self.s3_bucket, s3_client)
 
             # Compose transformers: first apply prefix, then IFCB-specific path structure
             # Inner layer: add S3 prefix (e.g., "ifcb_data/")
@@ -194,11 +231,62 @@ class RawProcessor(BaseProcessor):
 
     def data_directory(self) -> AsyncIfcbDataDirectory:
         return self._data_dir
-    
+
+    @asynccontextmanager
+    async def capacity_limit(self, group: str):
+        """Async context manager for per-group capacity limiting via Redis."""
+        max_concurrent = self.capacity_groups.get(group)
+        if max_concurrent is None:
+            raise ValueError(f"Unknown capacity group: {group}")
+
+        redis_client = await get_redis_client()
+        if redis_client is None:
+            # No Redis configured, pass through without limiting
+            yield
+            return
+
+        redis_key = f"ifcb_raw:capacity:{group}"
+        acquired = False
+
+        try:
+            # Atomically increment counter
+            new_count = await redis_client.incr(redis_key)
+            # Set TTL as safety net (in case of crashes)
+            await redis_client.expire(redis_key, self.capacity_key_ttl)
+
+            if new_count > max_concurrent:
+                # Over capacity - rollback and reject
+                await redis_client.decr(redis_key)
+                logger.warning(f"[CAPACITY] Group '{group}' exceeded: {new_count}/{max_concurrent} - returning 429")
+                raise HTTPException(
+                    status_code=429,
+                    detail={"error": "Too many concurrent requests", "group": group, "limit": max_concurrent},
+                    headers={"Retry-After": str(self.capacity_retry_after)},
+                )
+
+            acquired = True
+            yield
+
+        except redis.RedisError as e:
+            logger.error(f"[CAPACITY] Redis error: {e}")
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "Service temporarily unavailable"},
+                headers={"Retry-After": "5"},
+            )
+
+        finally:
+            if acquired and redis_client:
+                try:
+                    await redis_client.decr(redis_key)
+                except redis.RedisError as e:
+                    logger.error(f"[CAPACITY] Failed to decrement counter for group '{group}': {e}")
+
     async def raw_data_paths(self, bin_id: str):
         dd = self.data_directory()
         return await dd.paths(bin_id)
     
+    @capacity_limited(CAPACITY_FAST)
     async def handle_raw_file_request(self, path_params: RawBinParams, token_info=None):
         """ Retrieve raw IFCB files. """
         if path_params.extension == "adc":
@@ -227,9 +315,9 @@ class RawProcessor(BaseProcessor):
         }[path_params.extension]
         return render_bytes(content, media_type)
 
+    @capacity_limited(CAPACITY_SLOW)
     async def handle_raw_archive_file_request(self, path_params: RawBinArchiveParams, token_info=None):
         """ Retrieve raw IFCB files in a zip or tar/gzip archive. """
-
         if path_params.extension == "zip":
             media_type = "application/zip"
         elif path_params.extension == "tgz":
@@ -251,12 +339,11 @@ class RawProcessor(BaseProcessor):
                     await asyncio.to_thread(tarf.add, path, arcname=f"{path_params.bin_id}.{ext}")
 
         buffer.seek(0)
-
         return render_bytes(buffer.getvalue(), media_type)
 
+    @capacity_limited(CAPACITY_FAST)
     async def handle_roi_list_request(self, path_params: BinIDParams, token_info=None):
         """ Retrieve list of ROI IDs associated with the bin. """
-
         pid = path_params.bin_id
         dd = self._roi_meta_dir
 
@@ -281,6 +368,7 @@ class RawProcessor(BaseProcessor):
         image_list = await dd.list_images(pid)
         return image_list
 
+    @capacity_limited(CAPACITY_FAST)
     async def handle_roi_image_request(self, path_params: ROIImageParams, token_info=None):
         """ Retrieve a specific ROI image. """
         roi_id = path_params.roi_id
@@ -297,13 +385,13 @@ class RawProcessor(BaseProcessor):
             png_bytes = await asyncio.to_thread(self.roi_store.get, roi_id)
 
             if path_params.extension == "png":
-                return render_bytes(png_bytes, media_type)
+                return render_bytes(png_bytes, media_type, headers={'Expires': 'Fri, 01 Jan 2038 00:00:00 GMT'})
 
             img_buffer = BytesIO()
             image = Image.open(BytesIO(png_bytes))
             await asyncio.to_thread(image.convert("RGB").save, img_buffer, format="JPEG")
             img_buffer.seek(0)
-            return render_bytes(img_buffer.getvalue(), media_type)
+            return render_bytes(img_buffer.getvalue(), media_type, headers={'Expires': 'Fri, 01 Jan 2038 00:00:00 GMT'})
 
         # Legacy filesystem ROI retrieval
         pid, target = parse_target(roi_id)
@@ -320,6 +408,7 @@ class RawProcessor(BaseProcessor):
         img_buffer.seek(0)
         return render_bytes(img_buffer.getvalue(), media_type)
 
+    @capacity_limited(CAPACITY_FAST)
     async def handle_metadata_request(self, path_params: BinIDParams, token_info=None):
         """ Retrieve metadata from the header file. """
         try:
@@ -330,6 +419,7 @@ class RawProcessor(BaseProcessor):
         props = await asyncio.to_thread(parse_hdr_file, hdr_path)
         return props
 
+    @capacity_limited(CAPACITY_SLOW)
     async def handle_roi_archive_request(self, path_params: ROIArchiveParams, token_info=None):
         """ Retrieve a tar/zip archive of ROI images for a given bin. """
         dd = self._roi_meta_dir
