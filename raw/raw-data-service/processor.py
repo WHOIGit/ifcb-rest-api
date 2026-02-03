@@ -133,7 +133,7 @@ class RawProcessor(BaseProcessor):
                 )
             )
 
-            self.bucket_store = BucketStore(s3_client, self.s3_bucket)
+            self.bucket_store = BucketStore(self.s3_bucket, s3_client)
 
             # Compose transformers: first apply prefix, then IFCB-specific path structure
             # Inner layer: add S3 prefix (e.g., "ifcb_data/")
