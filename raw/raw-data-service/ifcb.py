@@ -553,6 +553,18 @@ class AsyncIfcbDataDirectory:
                 i += 1
         return images
 
+    async def images_exist(self, pid, roi_ids):
+        """Check if the specified ROI IDs exist in the fileset for the given PID."""
+        images = await self.list_images(pid)
+        existing_roi_ids = {img['roi_id'] for img in images.values()}
+        return {roi_id: (roi_id in existing_roi_ids) for roi_id in roi_ids}
+    
+    async def image_exists(self, roi_id):
+        """Check if the specified ROI ID exists in the fileset."""
+        bin_id, _ = parse_roi_id(roi_id)
+        exists = await self.images_exist(bin_id, [roi_id])
+        return exists[roi_id]
+    
     async def read_images(self, pid, rois=None):
         """Read ROI images from the fileset for the given PID."""
         if not self.require_roi:

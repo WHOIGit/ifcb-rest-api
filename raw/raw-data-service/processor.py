@@ -317,7 +317,6 @@ class RawProcessor(BaseProcessor):
     @capacity_limited(CAPACITY_FAST)
     async def handle_roi_image_request(self, path_params: ROIImageParams, token_info=None):
         """ Retrieve a specific ROI image. """
-        print(f'in handle_roi_image_request... bazzqux = {getattr(self.app.state, "foobar", None)}')
         roi_id = path_params.roi_id
         media_type = {
             "png": "image/png",

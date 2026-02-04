@@ -73,6 +73,9 @@ class AsyncFilesystemRoiStore(AsyncRoiStore):
             raise ValueError(f"Unsupported file_type: {file_type!r} (expected 'png' or 'jpg')")
         self.file_type = file_type
 
+    async def exists(self, roi_id: str) -> bool:
+        return await self.dd.image_exists(roi_id)
+
     async def get(self, roi_id: str) -> bytes:
         image = await self.dd.read_image(roi_id)
         image_data = BytesIO()
@@ -100,6 +103,9 @@ class S3RoiStore(SyncRoiStore):
         ifcb_transformer = IfcbPidTransformer()
         self.store = KeyTransformingStore(prefix_store, ifcb_transformer)
 
+    def exists(self, roi_id: str) -> bool:
+        return self.store.exists(roi_id)
+    
     def get(self, roi_id: str) -> bytes:
         return self.store.get(roi_id)
 
@@ -108,5 +114,8 @@ class AsyncS3RoiStore(AsyncRoiStore):
     def __init__(self, s3_bucket: str, s3_client=None, s3_prefix: str | None = None):
         self.store = S3RoiStore(s3_bucket, s3_client, s3_prefix)
 
+    async def exists(self, roi_id: str) -> bool:
+        return await asyncio.to_thread(self.store.exists, roi_id)
+    
     async def get(self, roi_id: str) -> bytes:
         return await asyncio.to_thread(self.store.get, roi_id)

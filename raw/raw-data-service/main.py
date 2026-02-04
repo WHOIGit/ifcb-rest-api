@@ -10,6 +10,8 @@ import boto3
 
 from stateless_microservice import ServiceConfig, create_app, AuthClient
 from storage.s3 import BucketStore
+from storage.aioutils import AsyncFanoutStore
+
 from .roistores import AsyncS3RoiStore, AsyncFilesystemRoiStore
 from .ifcb import AsyncIfcbDataDirectory
 from .processor import RawProcessor
@@ -148,7 +150,8 @@ async def lifespan(app: FastAPI):
     s3_prefix = os.getenv("S3_PREFIX", "")
     s3_concurrent_requests = int(os.getenv("S3_CONCURRENT_REQUESTS", "50"))
 
-    if s3_bucket and s3_access_key and s3_secret_key:
+    s3_configured = all([s3_bucket, s3_access_key, s3_secret_key])
+    if s3_configured:
         app.state.s3_session = boto3.session.Session()
         app.state.s3_client = app.state.s3_session.client(
             's3',
@@ -171,7 +174,19 @@ async def lifespan(app: FastAPI):
         app.state.fs_roi_store = AsyncFilesystemRoiStore(raw_data_dir, file_type="png")
         app.state.roi_fs_dir = AsyncIfcbDataDirectory(raw_data_dir)
 
-    
+    if s3_configured and raw_data_dir:
+        app.state.roi_store = None
+        app.state.roi_store = AsyncFanoutStore([
+            app.state.s3_roi_store,
+            app.state.fs_roi_store,
+        ])
+    elif s3_configured:
+        app.state.roi_store = app.state.s3_roi_store
+    elif raw_data_dir:
+        app.state.roi_store = app.state.fs_roi_store
+    else:
+        raise ValueError("At least one ROI backend must be configured (S3 or filesystem)")
+
     # init complete.
     yield
     # cleanup
