@@ -1,8 +1,12 @@
 from abc import ABC, abstractmethod
 from io import BytesIO
 
+from storage.s3 import BucketStore
+from storage.utils import KeyTransformingStore
+from storage.utils import PrefixKeyTransformer
+
 from .ifcb import SyncIfcbDataDirectory, AsyncIfcbDataDirectory
-from .ifcb_parsing import parse_roi_id
+from .s3utils import IfcbPidTransformer
 
 
 class SyncRoiStore(ABC):
@@ -76,3 +80,24 @@ class AsyncFilesystemRoiStore(AsyncRoiStore):
         else:  # png
             image.save(image_data, format="PNG")
         return image_data.getvalue()
+
+
+class S3RoiStore(SyncRoiStore):
+    """An S3-based asynchronous ROI store."""
+    def __init__(self, s3_bucket: str, s3_client=None, s3_prefix: str | None = None):
+        bucket_store = BucketStore(s3_bucket, s3_client)
+
+        # Compose transformers: first apply prefix, then IFCB-specific path structure
+        # Inner layer: add S3 prefix (e.g., "ifcb_data/")
+        if s3_prefix:
+            prefix_transformer = PrefixKeyTransformer(prefix=s3_prefix.rstrip("/") + "/")
+            prefix_store = KeyTransformingStore(bucket_store, prefix_transformer)
+        else:
+            prefix_store = bucket_store
+
+        # Outer layer: apply IFCB PID -> S3 path transformation
+        ifcb_transformer = IfcbPidTransformer()
+        self.store = KeyTransformingStore(prefix_store, ifcb_transformer)
+
+    def get(self, roi_id: str) -> bytes:
+        return self.store.get(roi_id)

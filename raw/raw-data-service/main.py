@@ -1,6 +1,8 @@
 """FastAPI entrypoint for the IFCB raw data service."""
+from contextlib import asynccontextmanager
 import logging
 import os
+from fastapi import FastAPI
 import redis.asyncio as redis
 
 from stateless_microservice import ServiceConfig, create_app, AuthClient
@@ -126,7 +128,13 @@ if not auth_service_url:
 
 auth_client = AuthClient(auth_service_url=auth_service_url)
 
-app = create_app(RawProcessor(), config, auth_client=auth_client)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Starting IFCB raw data service...")
+    yield
+    logger.info("Shutting down IFCB raw data service...")
+
+app = create_app(RawProcessor(), config, auth_client=auth_client, lifespan=lifespan)
 
 # Global capacity ceiling - runs before auth, prevents connection errors
 global_capacity = int(os.getenv("GLOBAL_CAPACITY_LIMIT", "100"))

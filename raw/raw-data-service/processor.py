@@ -13,7 +13,7 @@ from typing import List, Literal
 import aiofiles
 import boto3
 import botocore
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 import redis.asyncio as redis
 
@@ -24,7 +24,7 @@ from .ifcbhdr import parse_hdr_file
 from .s3utils import IfcbPidTransformer, list_roi_ids_from_s3
 from .redis_client import get_redis_client
 from .ifcb_parsing import parse_target
-from .roistores import AsyncFilesystemRoiStore
+from .roistores import AsyncFilesystemRoiStore, S3RoiStore
 
 from storage.s3 import BucketStore
 from storage.utils import KeyTransformingStore, PrefixKeyTransformer
@@ -87,6 +87,7 @@ class RawProcessor(BaseProcessor):
     """Processor for raw data requests."""
 
     def __init__(self):
+        print('initializing RawProcessor...')
         self.raw_data_dir = "/data/raw"  # Always mounted here in container
         self._data_dir = AsyncIfcbDataDirectory(self.raw_data_dir)
         # Metadata lookup does not require local .roi files
@@ -138,17 +139,11 @@ class RawProcessor(BaseProcessor):
 
             self.bucket_store = BucketStore(self.s3_bucket, s3_client)
 
-            # Compose transformers: first apply prefix, then IFCB-specific path structure
-            # Inner layer: add S3 prefix (e.g., "ifcb_data/")
-            if self.s3_prefix:
-                prefix_transformer = PrefixKeyTransformer(prefix=self.s3_prefix.rstrip("/") + "/")
-                prefix_store = KeyTransformingStore(self.bucket_store, prefix_transformer)
-            else:
-                prefix_store = self.bucket_store
-
-            # Outer layer: apply IFCB PID -> S3 path transformation
-            ifcb_transformer = IfcbPidTransformer()
-            self.roi_store = KeyTransformingStore(prefix_store, ifcb_transformer)
+            self._roi_store = S3RoiStore(
+                s3_bucket=self.s3_bucket,
+                s3_client=s3_client,
+                s3_prefix=self.s3_prefix,
+            )
         else:
             # Legacy filesystem ROI access
             self._roi_store = AsyncFilesystemRoiStore(self.raw_data_dir)
@@ -378,11 +373,10 @@ class RawProcessor(BaseProcessor):
         }[path_params.extension]
 
         if self.roi_backend == "s3":
-            exists = await asyncio.to_thread(self.roi_store.exists, roi_id)
-            if not exists:
-                raise HTTPException(status_code=404, detail=f"ROI ID {roi_id} not found.")
-
-            png_bytes = await asyncio.to_thread(self.roi_store.get, roi_id)
+            try:
+                png_bytes = await asyncio.to_thread(self._roi_store.get, roi_id)
+            except Exception as e: # which exception class will I get for not found?
+                raise HTTPException(status_code=500, detail=f"Error retrieving ROI ID {roi_id} from S3: {e}")
 
             if path_params.extension == "png":
                 return render_bytes(png_bytes, media_type, headers={'Expires': 'Fri, 01 Jan 2038 00:00:00 GMT'})
