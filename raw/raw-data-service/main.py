@@ -5,8 +5,13 @@ import os
 from fastapi import FastAPI
 import redis.asyncio as redis
 
-from stateless_microservice import ServiceConfig, create_app, AuthClient
+import botocore
+import boto3
 
+from stateless_microservice import ServiceConfig, create_app, AuthClient
+from storage.s3 import BucketStore
+from .roistores import AsyncS3RoiStore, AsyncFilesystemRoiStore
+from .ifcb import AsyncIfcbDataDirectory
 from .processor import RawProcessor
 from .redis_client import get_redis_client
 
@@ -130,9 +135,47 @@ auth_client = AuthClient(auth_service_url=auth_service_url)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting IFCB raw data service...")
+    print('initializing RawProcessor...')
+    raw_data_dir = "/data/raw"  # Always mounted here in container
+    app.state.data_dir = AsyncIfcbDataDirectory(raw_data_dir)
+    # Metadata lookup does not require local .roi files
+    app.state.roi_meta_dir = AsyncIfcbDataDirectory(raw_data_dir, require_roi=False)
+
+    s3_bucket = os.getenv("S3_BUCKET_NAME")
+    s3_endpoint = os.getenv("S3_ENDPOINT_URL")
+    s3_access_key = os.getenv("S3_ACCESS_KEY")
+    s3_secret_key = os.getenv("S3_SECRET_KEY")
+    s3_prefix = os.getenv("S3_PREFIX", "")
+    s3_concurrent_requests = int(os.getenv("S3_CONCURRENT_REQUESTS", "50"))
+
+    if s3_bucket and s3_access_key and s3_secret_key:
+        app.state.s3_session = boto3.session.Session()
+        app.state.s3_client = app.state.s3_session.client(
+            's3',
+            endpoint_url=s3_endpoint,
+            aws_access_key_id=s3_access_key,
+            aws_secret_access_key=s3_secret_key,
+            config = botocore.config.Config(
+                max_pool_connections=s3_concurrent_requests
+            )
+        )
+
+        app.state.bucket_store = BucketStore(s3_bucket, app.state.s3_client)
+        app.state.s3_roi_store = AsyncS3RoiStore(
+            s3_bucket=s3_bucket,
+            s3_client=app.state.s3_client,
+            s3_prefix=s3_prefix,
+        )
+    
+    if raw_data_dir:
+        app.state.fs_roi_store = AsyncFilesystemRoiStore(raw_data_dir, file_type="png")
+        app.state.roi_fs_dir = AsyncIfcbDataDirectory(raw_data_dir)
+
+    
+    # init complete.
     yield
-    logger.info("Shutting down IFCB raw data service...")
+    # cleanup
+    pass
 
 app = create_app(RawProcessor(), config, auth_client=auth_client, lifespan=lifespan)
 

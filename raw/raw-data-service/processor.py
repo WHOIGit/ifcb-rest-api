@@ -24,10 +24,10 @@ from .ifcbhdr import parse_hdr_file
 from .s3utils import IfcbPidTransformer, list_roi_ids_from_s3
 from .redis_client import get_redis_client
 from .ifcb_parsing import parse_target
-from .roistores import AsyncFilesystemRoiStore, S3RoiStore
+from .roistores import AsyncFilesystemRoiStore, AsyncS3RoiStore
 
 from storage.s3 import BucketStore
-from storage.utils import KeyTransformingStore, PrefixKeyTransformer
+
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -87,12 +87,6 @@ class RawProcessor(BaseProcessor):
     """Processor for raw data requests."""
 
     def __init__(self):
-        print('initializing RawProcessor...')
-        self.raw_data_dir = "/data/raw"  # Always mounted here in container
-        self._data_dir = AsyncIfcbDataDirectory(self.raw_data_dir)
-        # Metadata lookup does not require local .roi files
-        self._roi_meta_dir = AsyncIfcbDataDirectory(self.raw_data_dir, require_roi=False)
-
         # Capacity groups configuration
         # Can be overridden via CAPACITY_GROUPS env var as JSON
         # e.g. '{"fast": 40, "slow": 5}'
@@ -105,49 +99,6 @@ class RawProcessor(BaseProcessor):
 
         self.capacity_retry_after = int(os.getenv("CAPACITY_RETRY_AFTER", "1"))
         self.capacity_key_ttl = int(os.getenv("CAPACITY_KEY_TTL", "30"))
-
-        self.roi_backend = os.getenv("ROI_BACKEND", "s3").lower()
-
-        if self.roi_backend not in ("s3", "fs"):
-            raise ValueError("ROI_BACKEND must be 's3' or 'fs'")
-
-        self.s3_bucket = os.getenv("S3_BUCKET_NAME")
-        self.s3_endpoint = os.getenv("S3_ENDPOINT_URL")
-        self.s3_access_key = os.getenv("S3_ACCESS_KEY")
-        self.s3_secret_key = os.getenv("S3_SECRET_KEY")
-        self.s3_prefix = os.getenv("S3_PREFIX", "")
-        self.s3_concurrent_requests = int(os.getenv("S3_CONCURRENT_REQUESTS", "50"))
-
-        if self.roi_backend == "s3":
-            if not self.s3_bucket:
-                raise ValueError("S3_BUCKET_NAME environment variable is required when ROI_BACKEND=s3")
-            if not self.s3_access_key:
-                raise ValueError("S3_ACCESS_KEY environment variable is required when ROI_BACKEND=s3")
-            if not self.s3_secret_key:
-                raise ValueError("S3_SECRET_KEY environment variable is required when ROI_BACKEND=s3")
-
-            s3_session = boto3.session.Session()
-            s3_client = s3_session.client(
-                's3',
-                endpoint_url=self.s3_endpoint,
-                aws_access_key_id=self.s3_access_key,
-                aws_secret_access_key=self.s3_secret_key,
-                config = botocore.config.Config(
-                    max_pool_connections=self.s3_concurrent_requests
-                )
-            )
-
-            self.bucket_store = BucketStore(self.s3_bucket, s3_client)
-
-            self._roi_store = S3RoiStore(
-                s3_bucket=self.s3_bucket,
-                s3_client=s3_client,
-                s3_prefix=self.s3_prefix,
-            )
-        else:
-            # Legacy filesystem ROI access
-            self._roi_store = AsyncFilesystemRoiStore(self.raw_data_dir)
-            self._roi_fs_dir = AsyncIfcbDataDirectory(self.raw_data_dir)
 
     @property
     def name(self) -> str:
@@ -225,7 +176,7 @@ class RawProcessor(BaseProcessor):
         ]
 
     def data_directory(self) -> AsyncIfcbDataDirectory:
-        return self._data_dir
+        return self.app.state.data_dir
 
     @asynccontextmanager
     async def capacity_limit(self, group: str):
@@ -340,11 +291,11 @@ class RawProcessor(BaseProcessor):
     async def handle_roi_list_request(self, path_params: BinIDParams, token_info=None):
         """ Retrieve list of ROI IDs associated with the bin. """
         pid = path_params.bin_id
-        dd = self._roi_meta_dir
+        dd = self.app.state.roi_meta_dir
 
         if self.roi_backend == "s3":
             # List ROIs available in S3
-            roi_ids_in_s3 = await asyncio.to_thread(list_roi_ids_from_s3, self.bucket_store, pid, self.s3_prefix)
+            roi_ids_in_s3 = await asyncio.to_thread(list_roi_ids_from_s3, self.app.state.bucket_store, pid, self.s3_prefix)
             if not roi_ids_in_s3:
                 raise HTTPException(status_code=404, detail=f"Bin ID {pid} not found.")
 
@@ -366,34 +317,26 @@ class RawProcessor(BaseProcessor):
     @capacity_limited(CAPACITY_FAST)
     async def handle_roi_image_request(self, path_params: ROIImageParams, token_info=None):
         """ Retrieve a specific ROI image. """
+        print(f'in handle_roi_image_request... bazzqux = {getattr(self.app.state, "foobar", None)}')
         roi_id = path_params.roi_id
         media_type = {
             "png": "image/png",
             "jpg": "image/jpeg",
         }[path_params.extension]
 
-        if self.roi_backend == "s3":
-            try:
-                png_bytes = await asyncio.to_thread(self._roi_store.get, roi_id)
-            except Exception as e: # which exception class will I get for not found?
-                raise HTTPException(status_code=500, detail=f"Error retrieving ROI ID {roi_id} from S3: {e}")
-
-            if path_params.extension == "png":
-                return render_bytes(png_bytes, media_type, headers={'Expires': 'Fri, 01 Jan 2038 00:00:00 GMT'})
-
-            img_buffer = BytesIO()
-            image = Image.open(BytesIO(png_bytes))
-            await asyncio.to_thread(image.convert("RGB").save, img_buffer, format="JPEG")
-            img_buffer.seek(0)
-            return render_bytes(img_buffer.getvalue(), media_type, headers={'Expires': 'Fri, 01 Jan 2038 00:00:00 GMT'})
-
-        # Legacy filesystem ROI retrieval
-        roi_store = AsyncFilesystemRoiStore(self.raw_data_dir, file_type=path_params.extension)
         try:
-            img_bytes = await roi_store.get(roi_id)
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail=f"ROI ID {roi_id} not found.")
-        return render_bytes(img_bytes, media_type)
+            png_bytes = await self.app.state.roi_store.get(roi_id)
+        except Exception as e: # which exception class will I get for not found?
+            raise HTTPException(status_code=500, detail=f"Error retrieving ROI ID {roi_id} from S3: {e}")
+
+        if path_params.extension == "png":
+            return render_bytes(png_bytes, media_type, headers={'Expires': 'Fri, 01 Jan 2038 00:00:00 GMT'})
+
+        img_buffer = BytesIO()
+        image = Image.open(BytesIO(png_bytes))
+        await asyncio.to_thread(image.convert("RGB").save, img_buffer, format="JPEG")
+        img_buffer.seek(0)
+        return render_bytes(img_buffer.getvalue(), media_type, headers={'Expires': 'Fri, 01 Jan 2038 00:00:00 GMT'})
 
     @capacity_limited(CAPACITY_FAST)
     async def handle_metadata_request(self, path_params: BinIDParams, token_info=None):
@@ -421,7 +364,7 @@ class RawProcessor(BaseProcessor):
             roi_ids = [img["roi_id"] for img in images.values()]
         fs_images = None
         if self.roi_backend == "fs":
-            fs_images = await self._roi_fs_dir.read_images(pid)
+            fs_images = await self.app.state.roi_fs_dir.read_images(pid)
 
         def format_image(image):
             img_buffer = BytesIO()

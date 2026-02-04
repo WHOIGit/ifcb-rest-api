@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import asyncio
 from io import BytesIO
 
 from storage.s3 import BucketStore
@@ -101,3 +102,11 @@ class S3RoiStore(SyncRoiStore):
 
     def get(self, roi_id: str) -> bytes:
         return self.store.get(roi_id)
+
+class AsyncS3RoiStore(AsyncRoiStore):
+    """An S3-based asynchronous ROI store."""
+    def __init__(self, s3_bucket: str, s3_client=None, s3_prefix: str | None = None):
+        self.store = S3RoiStore(s3_bucket, s3_client, s3_prefix)
+
+    async def get(self, roi_id: str) -> bytes:
+        return await asyncio.to_thread(self.store.get, roi_id)
