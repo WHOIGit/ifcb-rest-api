@@ -2,9 +2,9 @@ from abc import ABC, abstractmethod
 import asyncio
 from io import BytesIO
 
+from storage.object import DictStore
 from storage.s3 import BucketStore
-from storage.utils import KeyTransformingStore
-from storage.utils import PrefixKeyTransformer
+from storage.utils import KeyTransformingStore, PrefixKeyTransformer
 
 from .ifcb import SyncIfcbDataDirectory, AsyncIfcbDataDirectory
 from .s3utils import IfcbPidTransformer
@@ -108,6 +108,9 @@ class S3RoiStore(SyncRoiStore):
     
     def get(self, roi_id: str) -> bytes:
         return self.store.get(roi_id)
+    
+    def put(self, roi_id: str, image_data: bytes):
+        return self.store.put(roi_id, image_data)
 
 class AsyncS3RoiStore(AsyncRoiStore):
     """An S3-based asynchronous ROI store."""
@@ -119,3 +122,60 @@ class AsyncS3RoiStore(AsyncRoiStore):
     
     async def get(self, roi_id: str) -> bytes:
         return await asyncio.to_thread(self.store.get, roi_id)
+    
+    async def put(self, roi_id: str, image_data: bytes):
+        return await asyncio.to_thread(self.store.put, roi_id, image_data)
+    
+
+class AsyncDictRoiStore(AsyncRoiStore):
+    """An in-memory asynchronous ROI store using a dictionary."""
+    def __init__(self):
+        self.store = DictStore()
+
+    async def exists(self, roi_id: str) -> bool:
+        return self.store.exists(roi_id)
+
+    async def get(self, roi_id: str) -> bytes:
+        return self.store.get(roi_id)
+
+    async def put(self, roi_id: str, image_data: bytes):
+        self.store.put(roi_id, image_data)
+
+class CachingRoiStore(AsyncRoiStore):
+    """semantics for a caching ROI store:
+    
+    read from cache first; if miss, read from S3; if miss, read from filesystem.
+    write to both cache and S3.
+    cache should be bounded in size and evict old items as needed (redis?)
+    """
+    def __init__(self, cache: AsyncRoiStore | None = AsyncDictRoiStore(),
+                 s3: AsyncS3RoiStore | None = None,
+                 fs: AsyncFilesystemRoiStore | None = None):
+        self.cache_store = cache
+        self.s3_store = s3
+        self.fs_store = fs
+
+    async def get(self, roi_id: str) -> bytes:
+        # try cache
+        if await self.cache_store.exists(roi_id):
+            return await self.cache_store.get(roi_id)
+        # try S3
+        if self.s3_store and await self.s3_store.exists(roi_id):
+            data = await self.s3_store.get(roi_id)
+            # populate cache
+            await self.cache_store.put(roi_id, data)
+            return data
+        # try filesystem
+        if self.fs_store and await self.fs_store.exists(roi_id):
+            data = await self.fs_store.get(roi_id)
+            # populate S3 and cache
+            if self.s3_store:
+                await self.s3_store.put(roi_id, data)
+            await self.cache_store.put(roi_id, data)
+            return data
+        raise KeyError(f"ROI ID {roi_id} not found in any store")
+
+    async def put(self, roi_id: str, image_data: bytes):
+        await self.cache_store.put(roi_id, image_data)
+        if self.s3_store:
+            await self.s3_store.put(roi_id, image_data)

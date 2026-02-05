@@ -325,8 +325,10 @@ class RawProcessor(BaseProcessor):
 
         try:
             png_bytes = await self.app.state.roi_store.get(roi_id)
-        except Exception as e: # which exception class will I get for not found?
-            raise HTTPException(status_code=500, detail=f"Error retrieving ROI ID {roi_id} from S3: {e}")
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=f"ROI ID {roi_id} not found.") from e
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error retrieving ROI ID {roi_id}: {e}")
 
         if path_params.extension == "png":
             return render_bytes(png_bytes, media_type, headers={'Expires': 'Fri, 01 Jan 2038 00:00:00 GMT'})

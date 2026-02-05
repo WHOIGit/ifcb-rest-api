@@ -10,9 +10,9 @@ import boto3
 
 from stateless_microservice import ServiceConfig, create_app, AuthClient
 from storage.s3 import BucketStore
-from storage.aioutils import AsyncFanoutStore
+from storage.redis import AsyncRedisStore
 
-from .roistores import AsyncS3RoiStore, AsyncFilesystemRoiStore
+from .roistores import AsyncS3RoiStore, AsyncFilesystemRoiStore, CachingRoiStore
 from .ifcb import AsyncIfcbDataDirectory
 from .processor import RawProcessor
 from .redis_client import get_redis_client
@@ -142,6 +142,8 @@ async def lifespan(app: FastAPI):
     app.state.data_dir = AsyncIfcbDataDirectory(raw_data_dir)
     # Metadata lookup does not require local .roi files
     app.state.roi_meta_dir = AsyncIfcbDataDirectory(raw_data_dir, require_roi=False)
+    # Redis client
+    app.state.redis_client = await get_redis_client()
 
     s3_bucket = os.getenv("S3_BUCKET_NAME")
     s3_endpoint = os.getenv("S3_ENDPOINT_URL")
@@ -151,6 +153,11 @@ async def lifespan(app: FastAPI):
     s3_concurrent_requests = int(os.getenv("S3_CONCURRENT_REQUESTS", "50"))
 
     s3_configured = all([s3_bucket, s3_access_key, s3_secret_key])
+    fs_configured = raw_data_dir is not None
+
+    app.state.s3_roi_store = None
+    app.state.fs_roi_store = None
+
     if s3_configured:
         app.state.s3_session = boto3.session.Session()
         app.state.s3_client = app.state.s3_session.client(
@@ -170,22 +177,15 @@ async def lifespan(app: FastAPI):
             s3_prefix=s3_prefix,
         )
     
-    if raw_data_dir:
+    if fs_configured:
         app.state.fs_roi_store = AsyncFilesystemRoiStore(raw_data_dir, file_type="png")
         app.state.roi_fs_dir = AsyncIfcbDataDirectory(raw_data_dir)
 
-    if s3_configured and raw_data_dir:
-        app.state.roi_store = None
-        app.state.roi_store = AsyncFanoutStore([
-            app.state.s3_roi_store,
-            app.state.fs_roi_store,
-        ])
-    elif s3_configured:
-        app.state.roi_store = app.state.s3_roi_store
-    elif raw_data_dir:
-        app.state.roi_store = app.state.fs_roi_store
-    else:
-        raise ValueError("At least one ROI backend must be configured (S3 or filesystem)")
+    app.state.roi_store = CachingRoiStore(
+        cache=AsyncRedisStore(app.state.redis_client),
+        s3=app.state.s3_roi_store,
+        fs=app.state.fs_roi_store,
+    )
 
     # init complete.
     yield
