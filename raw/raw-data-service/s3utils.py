@@ -99,3 +99,40 @@ class IfcbPidTransformer:
         roi_number = filename[:-4]
 
         return f"{bin_lid}_{roi_number}"
+
+
+class IfcbBinKeyTransformer:
+    """Transforms IFCB bin file basenames to/from S3 keys for use with KeyTransformingStore.
+
+    Transforms keys like 'D20250114T172241_IFCB109.hdr' to S3 keys like
+    '2025/D20250114T172241_IFCB109.hdr'.
+
+    For adding a prefix, compose this with PrefixKeyTransformer from storage.utils.
+    """
+
+    def transform_key(self, key: str) -> str:
+        """Transform bin file basename to S3 key.
+
+        Args:
+            key: Bin file basename like 'D20250114T172241_IFCB109.hdr'
+
+        Returns:
+            S3 key like '2025/D20250114T172241_IFCB109.hdr'
+        """
+        bin_id, ext = key.rsplit('.', 1)
+        if bin_id.startswith("D") and len(bin_id) >= 5:
+            year = bin_id[1:5]  # D20250114... -> 2025
+        else:
+            year = "legacy"
+        return f"{year}/{bin_id}.{ext}"
+
+    def reverse_transform_key(self, s3_key: str) -> str:
+        """Transform S3 key back to bin file basename.
+
+        Args:
+            s3_key: S3 key like '2025/D20250114T172241_IFCB109.hdr'
+
+        Returns:
+            Bin file basename like 'D20250114T172241_IFCB109.hdr'
+        """
+        return s3_key.split('/')[-1]
