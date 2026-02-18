@@ -191,6 +191,7 @@ class CachingRoiStore(AsyncRoiStore):
     async def put(self, roi_id: str, image_data: bytes):
         if self.s3_store:
             await self.s3_store.put(roi_id, image_data)
+            return
         raise RuntimeError("CachingRoiStore requires an S3 store to support put")
 
     async def exists(self, roi_id: str) -> bool:
