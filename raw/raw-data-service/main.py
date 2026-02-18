@@ -13,7 +13,7 @@ from storage.s3 import BucketStore
 from storage.redis import AsyncRedisStore
 
 from .roistores import AsyncS3RoiStore, AsyncFilesystemRoiStore, CachingRoiStore
-from .binstores import AsyncFilesystemBinStore, AsyncS3BinStore
+from .binstores import AsyncFilesystemBinStore, AsyncS3BinStore, CachingBinStore
 from .processor import RawProcessor
 from .redis_client import get_redis_client, close_redis_client
 
@@ -177,15 +177,14 @@ async def lifespan(app: FastAPI):
 
     if fs_configured:
         app.state.fs_roi_store = AsyncFilesystemRoiStore(raw_data_dir, file_type="png")
-        app.state.bin_store = AsyncFilesystemBinStore(raw_data_dir)
-    elif s3_configured:
-        app.state.bin_store = AsyncS3BinStore(
-            s3_bucket=s3_bucket,
-            s3_client=app.state.s3_client,
-            s3_prefix=s3_raw_prefix,
-        )
-    else:
-        app.state.bin_store = None
+
+    fs_bin_store = AsyncFilesystemBinStore(raw_data_dir) if fs_configured else None
+    s3_bin_store = AsyncS3BinStore(
+        s3_bucket=s3_bucket,
+        s3_client=app.state.s3_client,
+        s3_prefix=s3_raw_prefix,
+    ) if s3_configured else None
+    app.state.bin_store = CachingBinStore(fs=fs_bin_store, s3=s3_bin_store) if (fs_bin_store or s3_bin_store) else None
 
     app.state.roi_store = CachingRoiStore(
         cache=AsyncRedisStore(app.state.redis_client),

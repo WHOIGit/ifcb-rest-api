@@ -96,6 +96,10 @@ class AsyncBinStore(ABC):
         roi_bytes = await self.get(f"{bin_id}.roi")
         return await asyncio.to_thread(_extract_roi_images, bin_id, adc_bytes, roi_bytes, rois)
 
+    async def put(self, key: str, data: bytes) -> None:
+        """Store the given bin file. Default raises NotImplementedError."""
+        raise NotImplementedError("bin store is read-only")
+
     async def read_image(self, roi_id: str):
         """Extract a single PIL Image by ROI ID."""
         bin_id, target_num = parse_roi_id(roi_id)
@@ -210,3 +214,50 @@ class AsyncS3BinStore(AsyncBinStore):
 
     async def get(self, key: str) -> bytes:
         return await asyncio.to_thread(self._store.get, key)
+
+    async def put(self, key: str, data: bytes) -> None:
+        await asyncio.to_thread(self._store.put, key, data)
+
+
+class CachingBinStore(AsyncBinStore):
+    """Two-tier bin store: S3 as cache, filesystem as source of truth.
+
+    On get: tries S3 first; on miss falls back to filesystem and promotes
+    the file to S3 so subsequent reads are served from S3.
+    """
+
+    def __init__(
+        self,
+        fs: AsyncBinStore | None = None,
+        s3: AsyncS3BinStore | None = None,
+    ):
+        self.fs = fs
+        self.s3 = s3
+
+    async def exists(self, key: str) -> bool:
+        if self.s3 and await self.s3.exists(key):
+            return True
+        if self.fs and await self.fs.exists(key):
+            return True
+        return False
+
+    async def get(self, key: str) -> bytes:
+        # Try S3 first (already promoted)
+        if self.s3 and await self.s3.exists(key):
+            return await self.s3.get(key)
+        # Fall back to filesystem; promote to S3
+        if self.fs:
+            data = await self.fs.get(key)
+            if self.s3:
+                try:
+                    await self.s3.put(key, data)
+                except Exception:
+                    pass  # best-effort
+            return data
+        raise KeyError(key)
+
+    async def put(self, key: str, data: bytes) -> None:
+        if self.s3:
+            await self.s3.put(key, data)
+            return
+        raise NotImplementedError("CachingBinStore requires an S3 store to support put")
