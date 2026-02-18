@@ -335,6 +335,8 @@ class RawProcessor(BaseProcessor):
     @capacity_limited(CAPACITY_SLOW)
     async def handle_roi_archive_request(self, path_params: ROIArchiveParams, token_info=None):
         """ Retrieve a tar/zip archive of ROI images for a given bin. """
+        if self.app.state.roi_fs_dir is None:
+            raise HTTPException(status_code=503, detail="Filesystem ROI store not configured, cannot serve ROI archives.")
         dd = self.app.state.roi_meta_dir
         pid = path_params.bin_id
         roi_ids = []
