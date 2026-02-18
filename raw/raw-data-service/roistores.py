@@ -18,6 +18,11 @@ class SyncRoiStore(ABC):
         """Get the image data for the given ROI ID."""
         raise NotImplementedError
 
+    @abstractmethod
+    def exists(self, roi_id: str) -> bool:
+        """Check if the given ROI ID exists in the store."""
+        raise NotImplementedError
+
     def put(self, roi_id: str, image_data: bytes):
         raise NotImplementedError("ROI store is read-only")
     
@@ -28,6 +33,11 @@ class AsyncRoiStore(ABC):
     @abstractmethod
     async def get(self, roi_id: str) -> bytes:
         """Get the image data for the given ROI ID."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def exists(self, roi_id: str) -> bool:
+        """Check if the given ROI ID exists in the store."""
         raise NotImplementedError
 
     async def put(self, roi_id: str, image_data: bytes):
@@ -87,7 +97,7 @@ class AsyncFilesystemRoiStore(AsyncRoiStore):
 
 
 class S3RoiStore(SyncRoiStore):
-    """An S3-based asynchronous ROI store."""
+    """An S3-based synchronous ROI store."""
     def __init__(self, s3_bucket: str, s3_client=None, s3_prefix: str | None = None):
         bucket_store = BucketStore(s3_bucket, s3_client)
 
@@ -170,7 +180,10 @@ class CachingRoiStore(AsyncRoiStore):
             data = await self.fs_store.get(roi_id)
             # populate S3 and cache
             if self.s3_store:
-                await self.s3_store.put(roi_id, data)
+                try:
+                    await self.s3_store.put(roi_id, data)
+                except Exception:
+                    pass
             await self.cache_store.put(roi_id, data)
             return data
         raise KeyError(f"ROI ID {roi_id} not found in any store")
@@ -178,4 +191,16 @@ class CachingRoiStore(AsyncRoiStore):
     async def put(self, roi_id: str, image_data: bytes):
         await self.cache_store.put(roi_id, image_data)
         if self.s3_store:
-            await self.s3_store.put(roi_id, image_data)
+            try:
+                await self.s3_store.put(roi_id, image_data)
+            except:
+                pass
+
+    async def exists(self, roi_id: str) -> bool:
+        if await self.cache_store.exists(roi_id):
+            return True
+        if self.s3_store and await self.s3_store.exists(roi_id):
+            return True
+        if self.fs_store and await self.fs_store.exists(roi_id):
+            return True
+        return False
