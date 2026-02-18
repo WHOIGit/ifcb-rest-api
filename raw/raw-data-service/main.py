@@ -15,7 +15,7 @@ from storage.redis import AsyncRedisStore
 from .roistores import AsyncS3RoiStore, AsyncFilesystemRoiStore, CachingRoiStore
 from .ifcb import AsyncIfcbDataDirectory
 from .processor import RawProcessor
-from .redis_client import get_redis_client
+from .redis_client import get_redis_client, close_redis_client
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +190,7 @@ async def lifespan(app: FastAPI):
     # init complete.
     yield
     # cleanup
-    pass
+    await close_redis_client()
 
 app = create_app(RawProcessor(), config, auth_client=auth_client, lifespan=lifespan)
 
