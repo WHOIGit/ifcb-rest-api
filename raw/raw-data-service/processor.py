@@ -10,7 +10,6 @@ import time
 
 from typing import List, Literal
 
-import aiofiles
 import boto3
 import botocore
 from fastapi import FastAPI, HTTPException
@@ -19,8 +18,8 @@ import redis.asyncio as redis
 
 from stateless_microservice import BaseProcessor, StatelessAction, render_bytes
 
-from .ifcb import AsyncIfcbDataDirectory, SyncIfcbDataDirectory
-from .ifcbhdr import parse_hdr_file
+from .binstores import AsyncBinStore
+from .ifcbhdr import parse_hdr_bytes
 from .s3utils import IfcbPidTransformer, list_roi_ids_from_s3
 from .redis_client import get_redis_client
 from .ifcb_parsing import parse_target
@@ -175,8 +174,8 @@ class RawProcessor(BaseProcessor):
 
         ]
 
-    def data_directory(self) -> AsyncIfcbDataDirectory:
-        return self.app.state.data_dir
+    def bin_store(self) -> AsyncBinStore:
+        return self.app.state.bin_store
 
     @asynccontextmanager
     async def capacity_limit(self, group: str):
@@ -228,32 +227,14 @@ class RawProcessor(BaseProcessor):
                 except redis.RedisError as e:
                     logger.error(f"[CAPACITY] Failed to decrement counter for group '{group}': {e}")
 
-    async def raw_data_paths(self, bin_id: str):
-        dd = self.data_directory()
-        return await dd.paths(bin_id)
-    
     @capacity_limited(CAPACITY_FAST)
     async def handle_raw_file_request(self, path_params: RawBinParams, token_info=None):
         """ Retrieve raw IFCB files. """
-        if path_params.extension == "adc":
-            require_adc = True
-            require_roi = False
-        elif path_params.extension == "roi":
-            require_adc = True
-            require_roi = True
-        else:
-            require_adc = False
-            require_roi = False
+        key = f"{path_params.bin_id}.{path_params.extension}"
         try:
-            paths = await self.raw_data_paths(path_params.bin_id)
+            content = await self.bin_store().get(key)
         except KeyError:
             raise HTTPException(status_code=404, detail=f"Bin ID {path_params.bin_id} not found.")
-        path = paths.get(path_params.extension)
-        if path is None:
-            raise FileNotFoundError(f"No file with extension {path_params.extension} for bin {path_params.bin_id}")
-        # read file contents from path
-        async with aiofiles.open(path, mode='rb') as f:
-            content = await f.read()
         media_type = {
             "hdr": "text/plain",
             "adc": "text/csv",
@@ -264,25 +245,45 @@ class RawProcessor(BaseProcessor):
     @capacity_limited(CAPACITY_SLOW)
     async def handle_raw_archive_file_request(self, path_params: RawBinArchiveParams, token_info=None):
         """ Retrieve raw IFCB files in a zip or tar/gzip archive. """
-        if path_params.extension == "zip":
-            media_type = "application/zip"
-        elif path_params.extension == "tgz":
-            media_type = "application/gzip"
+        bin_id = path_params.bin_id
+        store = self.bin_store()
 
-        paths = await self.raw_data_paths(path_params.bin_id)
+        # Fetch all three raw files concurrently
+        try:
+            hdr_bytes, adc_bytes, roi_bytes = await asyncio.gather(
+                store.get(f"{bin_id}.hdr"),
+                store.get(f"{bin_id}.adc"),
+                store.get(f"{bin_id}.roi"),
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"Bin ID {bin_id} not found.")
+
+        raw_files = {
+            "hdr": hdr_bytes,
+            "adc": adc_bytes,
+            "roi": roi_bytes,
+        }
 
         buffer = BytesIO()
 
         if path_params.extension == "zip":
             import zipfile
-            with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
-                for ext, path in paths.items():
-                    await asyncio.to_thread(zipf.write, path, arcname=f"{path_params.bin_id}.{ext}")
+            media_type = "application/zip"
+            def write_zip():
+                with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
+                    for ext, data in raw_files.items():
+                        zipf.writestr(f"{bin_id}.{ext}", data)
+            await asyncio.to_thread(write_zip)
         elif path_params.extension == "tgz":
             import tarfile
-            with tarfile.open(fileobj=buffer, mode='w:gz') as tarf:
-                for ext, path in paths.items():
-                    await asyncio.to_thread(tarf.add, path, arcname=f"{path_params.bin_id}.{ext}")
+            media_type = "application/gzip"
+            def write_tgz():
+                with tarfile.open(fileobj=buffer, mode='w:gz') as tarf:
+                    for ext, data in raw_files.items():
+                        info = tarfile.TarInfo(name=f"{bin_id}.{ext}")
+                        info.size = len(data)
+                        tarf.addfile(tarinfo=info, fileobj=BytesIO(data))
+            await asyncio.to_thread(write_tgz)
 
         buffer.seek(0)
         return render_bytes(buffer.getvalue(), media_type)
@@ -291,9 +292,10 @@ class RawProcessor(BaseProcessor):
     async def handle_roi_list_request(self, path_params: BinIDParams, token_info=None):
         """ Retrieve list of ROI IDs associated with the bin. """
         pid = path_params.bin_id
-        dd = self.app.state.roi_meta_dir
-
-        image_list = await dd.list_images(pid)
+        try:
+            image_list = await self.bin_store().list_images(pid)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"Bin ID {pid} not found.")
         return image_list
 
     @capacity_limited(CAPACITY_FAST)
@@ -325,25 +327,25 @@ class RawProcessor(BaseProcessor):
     async def handle_metadata_request(self, path_params: BinIDParams, token_info=None):
         """ Retrieve metadata from the header file. """
         try:
-            paths = await self.raw_data_paths(path_params.bin_id)
+            hdr_bytes = await self.bin_store().get(f"{path_params.bin_id}.hdr")
         except KeyError:
             raise HTTPException(status_code=404, detail=f"Bin ID {path_params.bin_id} not found.")
-        hdr_path = paths.get("hdr")
-        props = await asyncio.to_thread(parse_hdr_file, hdr_path)
+        props = await asyncio.to_thread(parse_hdr_bytes, hdr_bytes)
         return props
 
     @capacity_limited(CAPACITY_SLOW)
     async def handle_roi_archive_request(self, path_params: ROIArchiveParams, token_info=None):
         """ Retrieve a tar/zip archive of ROI images for a given bin. """
-        if self.app.state.roi_fs_dir is None:
-            raise HTTPException(status_code=503, detail="Filesystem ROI store not configured, cannot serve ROI archives.")
-        dd = self.app.state.roi_meta_dir
+        store = self.bin_store()
+        if store is None:
+            raise HTTPException(status_code=503, detail="Raw data store not configured, cannot serve ROI archives.")
         pid = path_params.bin_id
-        roi_ids = []
-        images = await dd.list_images(pid)
+        try:
+            images = await store.list_images(pid)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"Bin ID {pid} not found.")
         roi_ids = [img["roi_id"] for img in images.values()]
-        fs_images = None
-        fs_images = await self.app.state.roi_fs_dir.read_images(pid)
+        fs_images = await store.read_images(pid)
 
         def format_image(image):
             img_buffer = BytesIO()
