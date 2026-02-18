@@ -108,5 +108,5 @@ def parse_hdr_bytes(content: bytes) -> dict:
     :returns dict: the header properties
     :see parse_hdr
     """
-    lines = content.decode('latin-1').splitlines()
+    lines = content.decode('utf-8', errors='replace').splitlines()
     return parse_hdr(lines)
