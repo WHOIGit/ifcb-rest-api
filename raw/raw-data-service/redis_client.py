@@ -23,3 +23,11 @@ async def get_redis_client() -> redis.Redis | None:
             socket_timeout=2,
         )
     return _redis_client
+
+
+async def close_redis_client():
+    """Close the Redis client and reset the singleton."""
+    global _redis_client
+    if _redis_client is not None:
+        await _redis_client.aclose()
+        _redis_client = None

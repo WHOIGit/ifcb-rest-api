@@ -1,13 +1,21 @@
 """FastAPI entrypoint for the IFCB raw data service."""
+from contextlib import asynccontextmanager
 import logging
 import os
-
+from fastapi import FastAPI
 import redis.asyncio as redis
 
-from stateless_microservice import ServiceConfig, create_app, AuthClient
+import botocore
+import boto3
 
+from stateless_microservice import ServiceConfig, create_app, AuthClient
+from storage.s3 import BucketStore
+from storage.redis import AsyncRedisStore
+
+from .roistores import AsyncS3RoiStore, AsyncFilesystemRoiStore, CachingRoiStore
+from .ifcb import AsyncIfcbDataDirectory
 from .processor import RawProcessor
-from .redis_client import get_redis_client
+from .redis_client import get_redis_client, close_redis_client
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +135,64 @@ if not auth_service_url:
 
 auth_client = AuthClient(auth_service_url=auth_service_url)
 
-app = create_app(RawProcessor(), config, auth_client=auth_client)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print('initializing RawProcessor...')
+    raw_data_dir = "/data/raw"  # Always mounted here in container
+    app.state.data_dir = AsyncIfcbDataDirectory(raw_data_dir)
+    # Metadata lookup does not require local .roi files
+    app.state.roi_meta_dir = AsyncIfcbDataDirectory(raw_data_dir, require_roi=False)
+    # Redis client
+    app.state.redis_client = await get_redis_client()
+
+    s3_bucket = os.getenv("S3_BUCKET_NAME")
+    s3_endpoint = os.getenv("S3_ENDPOINT_URL")
+    s3_access_key = os.getenv("S3_ACCESS_KEY")
+    s3_secret_key = os.getenv("S3_SECRET_KEY")
+    s3_prefix = os.getenv("S3_PREFIX", "")
+    s3_concurrent_requests = int(os.getenv("S3_CONCURRENT_REQUESTS", "50"))
+
+    s3_configured = all([s3_bucket, s3_access_key, s3_secret_key])
+    fs_configured = raw_data_dir is not None
+
+    app.state.s3_roi_store = None
+    app.state.fs_roi_store = None
+
+    if s3_configured:
+        app.state.s3_session = boto3.session.Session()
+        app.state.s3_client = app.state.s3_session.client(
+            's3',
+            endpoint_url=s3_endpoint,
+            aws_access_key_id=s3_access_key,
+            aws_secret_access_key=s3_secret_key,
+            config = botocore.config.Config(
+                max_pool_connections=s3_concurrent_requests
+            )
+        )
+
+        app.state.bucket_store = BucketStore(s3_bucket, app.state.s3_client)
+        app.state.s3_roi_store = AsyncS3RoiStore(
+            s3_bucket=s3_bucket,
+            s3_client=app.state.s3_client,
+            s3_prefix=s3_prefix,
+        )
+    
+    if fs_configured:
+        app.state.fs_roi_store = AsyncFilesystemRoiStore(raw_data_dir, file_type="png")
+        app.state.roi_fs_dir = AsyncIfcbDataDirectory(raw_data_dir)
+
+    app.state.roi_store = CachingRoiStore(
+        cache=AsyncRedisStore(app.state.redis_client),
+        s3=app.state.s3_roi_store,
+        fs=app.state.fs_roi_store,
+    )
+
+    # init complete.
+    yield
+    # cleanup
+    await close_redis_client()
+
+app = create_app(RawProcessor(), config, auth_client=auth_client, lifespan=lifespan)
 
 # Global capacity ceiling - runs before auth, prevents connection errors
 global_capacity = int(os.getenv("GLOBAL_CAPACITY_LIMIT", "100"))

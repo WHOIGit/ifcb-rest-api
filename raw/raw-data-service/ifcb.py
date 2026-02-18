@@ -7,6 +7,8 @@ import re
 
 from PIL import Image
 
+from .ifcb_parsing import add_target, parse_roi_id, parse_bin_id, bin_timestamp
+
 
 DEFAULT_EXCLUDE = ['skip', 'beads']
 DEFAULT_INCLUDE = ['data']
@@ -65,6 +67,25 @@ async def _async_split_dir_entries(dirpath, *, exclude=DEFAULT_EXCLUDE, sort=Tru
         filenames.sort(reverse=reverse)
     return dirnames, filenames
 
+def _sync_split_dir_entries(dirpath, *, exclude=DEFAULT_EXCLUDE, sort=True, reverse=False):
+    """Return (dirnames, filenames) for dirpath using synchronous os calls."""
+    names = os.listdir(dirpath)
+    dirnames, filenames = [], []
+
+    for name in names:
+        if os.path.isdir(os.path.join(dirpath, name)):
+            if name in exclude:
+                continue
+            dirnames.append(name)
+        else:
+            filenames.append(name)
+
+    if sort:
+        dirnames.sort(reverse=reverse)
+        filenames.sort(reverse=reverse)
+    return dirnames, filenames
+
+
 async def async_list_filesets(
     dirpath,
     exclude=DEFAULT_EXCLUDE,
@@ -106,6 +127,47 @@ async def async_list_filesets(
                         continue
                 yield dp, basename
 
+def sync_list_filesets(
+    dirpath,
+    exclude=DEFAULT_EXCLUDE,
+    include=DEFAULT_INCLUDE,
+    sort=True,
+    validate=True,
+    require_adc=True,
+    require_roi=True,
+):
+    """
+    Sync version of list_filesets using os for directory traversal.
+
+    Yields (dp, basename) for each .adc/.hdr/(.roi) fileset found.
+    """
+    if not set(exclude).isdisjoint(set(include)):
+        raise ValueError('include and exclude must be disjoint')
+
+    stack = [dirpath]
+    while stack:
+        dp = stack.pop()
+        dirnames, filenames = _sync_split_dir_entries(dp, exclude=exclude, sort=sort, reverse=True)
+
+        for d in dirnames:
+            stack.append(os.path.join(dp, d))
+
+        fnset = set(filenames)
+        for f in filenames:
+            basename, extension = f[:-4], f[-3:]
+            has_adc = (basename + '.adc') in fnset
+            has_roi = (basename + '.roi') in fnset
+            if extension == 'hdr' and (has_adc or not require_adc) and (has_roi or not require_roi):
+                if validate:
+                    if dp == dirpath:
+                        reldir = ''
+                    else:
+                        reldir = dp[len(dirpath) + 1:]
+                    if not validate_path(os.path.join(reldir, basename), include=include, exclude=exclude):
+                        continue
+                yield dp, basename
+
+
 async def async_list_data_dirs(dirpath, exclude=DEFAULT_EXCLUDE, sort=True, prune=True):
     """
     Async version of list_data_dirs using aiofiles for directory traversal.
@@ -125,6 +187,27 @@ async def async_list_data_dirs(dirpath, exclude=DEFAULT_EXCLUDE, sort=True, prun
         child = os.path.join(dirpath, name)
         async for dd in async_list_data_dirs(child, exclude=exclude, sort=sort, prune=prune):
             yield dd
+
+def sync_list_data_dirs(dirpath, exclude=DEFAULT_EXCLUDE, sort=True, prune=True):
+    """
+    Sync version of list_data_dirs using os for directory traversal.
+
+    Yields descendant directories that contain at least one .hdr file.
+    """
+    dirnames, filenames = _sync_split_dir_entries(dirpath, exclude=exclude, sort=sort, reverse=False)
+
+    for name in filenames:
+        if name[-3:] == 'hdr':
+            yield dirpath
+            if prune:
+                return
+            break
+
+    for name in dirnames:
+        child = os.path.join(dirpath, name)
+        for dd in sync_list_data_dirs(child, exclude=exclude, sort=sort, prune=prune):
+            yield dd
+
 
 async def async_find_fileset(
     dirpath,
@@ -175,7 +258,195 @@ async def async_find_fileset(
     return None
 
 
-class IfcbDataDirectory:
+def sync_find_fileset(
+    dirpath,
+    pid,
+    include=DEFAULT_INCLUDE,
+    exclude=DEFAULT_EXCLUDE,
+    require_adc=True,
+    require_roi=True,
+):
+    """
+    Sync version of find_fileset using os for directory traversal.
+
+    Returns basepath or None.
+    """
+    try:
+        names = os.listdir(dirpath)
+    except FileNotFoundError:
+        return None
+
+    # check direct match first
+    hdr_name = pid + '.hdr'
+    if hdr_name in names:
+        basepath = os.path.join(dirpath, pid)
+        if require_adc and (pid + '.adc') not in names:
+            return None
+        if require_roi and (pid + '.roi') not in names:
+            return None
+        return basepath
+
+    # recurse into plausible subdirectories
+    for name in names:
+        if name in exclude:
+            continue
+        if name in include or name in pid:
+            child = os.path.join(dirpath, name)
+            if os.path.isdir(child):
+                fs = sync_find_fileset(
+                    child,
+                    pid,
+                    include=include,
+                    exclude=exclude,
+                    require_adc=require_adc,
+                    require_roi=require_roi,
+                )
+                if fs is not None:
+                    return fs
+    return None
+
+
+class SyncIfcbDataDirectory:
+    """Synchronous representation of an IFCB data directory.
+
+    :param root_path: the root directory containing IFCB filesets
+    :param include: list of directory names to include when searching
+    :param exclude: list of directory names to exclude when searching
+    :param require_adc: if True, only consider filesets with .adc files
+    :param require_roi: if True, only consider filesets with .roi files
+    """
+
+    def __init__(
+        self,
+        root_path,
+        include=DEFAULT_INCLUDE,
+        exclude=DEFAULT_EXCLUDE,
+        require_adc=True,
+        require_roi=True,
+    ):
+        self.root_path = root_path
+        self.include = include
+        self.exclude = exclude
+        self.require_adc = require_adc
+        self.require_roi = require_roi
+
+        if not set(exclude).isdisjoint(set(include)):
+            raise ValueError('include and exclude must be disjoint')
+
+        if require_roi and not require_adc:
+            raise ValueError('require_roi=True requires require_adc=True')
+
+    def _exists(self, pid):
+        """Check if the fileset for the given PID exists."""
+        fs = sync_find_fileset(
+            self.root_path,
+            pid,
+            include=self.include,
+            exclude=self.exclude,
+            require_adc=self.require_adc,
+            require_roi=self.require_roi,
+        )
+        if fs is None:
+            return False, None
+        return True, fs
+
+    def exists(self, pid):
+        """Return True if the fileset for the given PID exists, False otherwise."""
+        exists, _ = self._exists(pid)
+        return exists
+
+    def paths(self, pid):
+        """Return the full path to the specified file in the fileset for the given PID."""
+        exists, fs = self._exists(pid)
+        if not exists:
+            raise KeyError(pid)
+        return {
+            'hdr': fs + '.hdr',
+            'adc': fs + '.adc' if self.require_adc else None,
+            'roi': fs + '.roi' if self.require_roi else None,
+        }
+
+    def list(self):
+        """Yield all PIDs and associated paths in the store."""
+        for dp, bn in sync_list_filesets(
+            self.root_path,
+            exclude=self.exclude,
+            include=self.include,
+            require_adc=self.require_adc,
+            require_roi=self.require_roi,
+        ):
+            yield {
+                'pid': bn,
+                'hdr': os.path.join(dp, bn + '.hdr'),
+                'adc': os.path.join(dp, bn + '.adc') if self.require_adc else None,
+                'roi': os.path.join(dp, bn + '.roi') if self.require_roi else None,
+            }
+
+    def list_images(self, pid):
+        """List ROI image metadata from the fileset for the given PID."""
+        paths = self.paths(pid)
+        adc_path = paths.get('adc')
+        if pid.startswith('I'):
+            x_col, y_col, w_col, h_col = 9, 10, 11, 12
+        else:
+            x_col, y_col, w_col, h_col = 13, 14, 15, 16
+        images = {}
+        with open(adc_path, 'r') as adc_file:
+            for i, line in enumerate(adc_file):
+                fields = line.strip().split(',')
+                x = int(fields[x_col])
+                y = int(fields[y_col])
+                width = int(fields[w_col])
+                height = int(fields[h_col])
+                if width == 0 or height == 0:
+                    continue  # skip triggers without ROIs
+                images[i + 1] = {
+                    'roi_id': add_target(pid, i + 1),
+                    'x': x,
+                    'y': y,
+                    'width': width,
+                    'height': height,
+                }
+        return images
+
+    def read_images(self, pid, rois=None):
+        """Read ROI images from the fileset for the given PID."""
+        if not self.require_roi:
+            raise ValueError('require_roi must be True to read ROI images')
+        paths = self.paths(pid)
+        adc_path = paths.get('adc')
+        roi_path = paths.get('roi')
+        if pid.startswith('I'):
+            w_col, h_col, offset_col = 11, 12, 13
+        else:
+            w_col, h_col, offset_col = 15, 16, 17
+        images = {}
+        with open(roi_path, 'rb') as roi_file:
+            with open(adc_path, 'r') as adc_file:
+                for i, line in enumerate(adc_file):
+                    if rois is not None and (i + 1) not in rois:
+                        continue  # skip unwanted ROIs
+                    fields = line.strip().split(',')
+                    width = int(fields[w_col])
+                    height = int(fields[h_col])
+                    if width == 0 or height == 0:
+                        continue  # skip triggers without ROIs
+                    offset = int(fields[offset_col])
+                    roi_file.seek(offset)
+                    data = roi_file.read(width * height)
+                    image = Image.frombuffer('L', (width, height), data, 'raw', 'L', 0, 1)
+                    images[i + 1] = image
+        return images
+
+    def read_image(self, roi_id):
+        """Read a single ROI image by its ROI ID."""
+        bin_id, target_num = parse_roi_id(roi_id)
+        images = self.read_images(bin_id, rois={target_num})
+        if target_num not in images:
+            raise KeyError(roi_id)
+        return images[target_num]
+
+class AsyncIfcbDataDirectory:
     """Representation of an IFCB data directory.
 
     :param root_path: the root directory containing IFCB filesets
@@ -201,7 +472,7 @@ class IfcbDataDirectory:
 
         if not set(exclude).isdisjoint(set(include)):
             raise ValueError('include and exclude must be disjoint')
-        
+
         if require_roi and not require_adc:
             raise ValueError('require_roi=True requires require_adc=True')
 
@@ -218,12 +489,12 @@ class IfcbDataDirectory:
         if fs is None:
             return False, None
         return True, fs
-    
+
     async def exists(self, pid):
         """Return True if the fileset for the given PID exists, False otherwise."""
         exists, _ = await self._exists(pid)
         return exists
-    
+
     async def paths(self, pid):
         """Return the full path to the specified file in the fileset for the given PID."""
         exists, fs = await self._exists(pid)
@@ -270,10 +541,10 @@ class IfcbDataDirectory:
                 width = int(fields[w_col])
                 height = int(fields[h_col])
                 if width == 0 or height == 0:
-                    pass # skip triggers without ROIs
+                    pass  # skip triggers without ROIs
                 else:
-                    images[i+1] = {
-                        'roi_id': add_target(pid, i+1),
+                    images[i + 1] = {
+                        'roi_id': add_target(pid, i + 1),
                         'x': x,
                         'y': y,
                         'width': width,
@@ -282,6 +553,18 @@ class IfcbDataDirectory:
                 i += 1
         return images
 
+    async def images_exist(self, pid, roi_ids):
+        """Check if the specified ROI IDs exist in the fileset for the given PID."""
+        images = await self.list_images(pid)
+        existing_roi_ids = {img['roi_id'] for img in images.values()}
+        return {roi_id: (roi_id in existing_roi_ids) for roi_id in roi_ids}
+    
+    async def image_exists(self, roi_id):
+        """Check if the specified ROI ID exists in the fileset."""
+        bin_id, _ = parse_roi_id(roi_id)
+        exists = await self.images_exist(bin_id, [roi_id])
+        return exists[roi_id]
+    
     async def read_images(self, pid, rois=None):
         """Read ROI images from the fileset for the given PID."""
         if not self.require_roi:
@@ -301,109 +584,27 @@ class IfcbDataDirectory:
                     fields = line.strip().split(',')
                     width = int(fields[w_col])
                     height = int(fields[h_col])
-                    if rois is not None and (i+1) not in rois:
-                        pass # skip unwanted ROIs
+                    if rois is not None and (i + 1) not in rois:
+                        pass  # skip unwanted ROIs
                     elif width == 0 or height == 0:
-                        pass # skip triggers without ROIs
+                        pass  # skip triggers without ROIs
                     else:
                         offset = int(fields[offset_col])
                         await roi_file.seek(offset)
                         data = await roi_file.read(width * height)
                         image = await asyncio.to_thread(Image.frombuffer, 'L', (width, height), data, 'raw', 'L', 0, 1)
-                        images[i+1] = image
+                        images[i + 1] = image
                     i += 1
         return images
 
-# parse "I" style bin IDs in the form 'IFCB{n}_{yyyy}_{ddd}_{hh}{mm}{ss}'
-def parse_ifcb_i_bin_id(bin_id):
-    import re
-    pattern = r'^IFCB(\d+)_(\d{4})_(\d{3})_(\d{2})(\d{2})(\d{2})$'
-    match = re.match(pattern, bin_id)
-    if not match:
-        raise ValueError(f'Invalid IFCB bin ID format: {bin_id}')
-    instrument_id = int(match.group(1))
-    year = int(match.group(2))
-    day_of_year = int(match.group(3))
-    hour = int(match.group(4))
-    minute = int(match.group(5))
-    second = int(match.group(6))
-    return {
-        'instrument_id': instrument_id,
-        'year': year,
-        'day_of_year': day_of_year,
-        'hour': hour,
-        'minute': minute,
-        'second': second,
-    }
-
-# parse "D" style bin IDs in the form 'D{yyyy}{mm}{dd}T{hh}{mm}{ss}_IFCB{n}'
-def parse_ifcb_d_bin_id(bin_id):
-    import re
-    pattern = r'^D(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})_IFCB(\d+)$'
-    match = re.match(pattern, bin_id)
-    if not match:
-        raise ValueError(f'Invalid IFCB D-style bin ID format: {bin_id}')
-    year = int(match.group(1))
-    month = int(match.group(2))
-    day = int(match.group(3))
-    hour = int(match.group(4))
-    minute = int(match.group(5))
-    second = int(match.group(6))
-    instrument_id = int(match.group(7))
-    return {
-        'instrument_id': instrument_id,
-        'year': year,
-        'month': month,
-        'day': day,
-        'hour': hour,
-        'minute': minute,
-        'second': second,
-    }
-
-def parse_bin_id(bin_id: str):
-    """Parse an IFCB bin ID in either "I" or "D" style format."""
-    if bin_id.startswith('D'):
-        return parse_ifcb_d_bin_id(bin_id)
-    else:
-        return parse_ifcb_i_bin_id(bin_id)
-
-def bin_timestamp(bin_id: str):
-    """Extract a timestamp from an IFCB bin ID."""
-    from datetime import datetime, timedelta, timezone
-
-    parsed = parse_bin_id(bin_id)
-    if 'day_of_year' in parsed:
-        dt = datetime(parsed['year'], 1, 1, tzinfo=timezone.utc) + timedelta(days=parsed['day_of_year'] - 1)
-        dt = dt.replace(hour=parsed['hour'], minute=parsed['minute'], second=parsed['second'])
-    else:
-        dt = datetime(
-            parsed['year'],
-            parsed['month'],
-            parsed['day'],
-            parsed['hour'],
-            parsed['minute'],
-            parsed['second'],
-            tzinfo=timezone.utc,
-        )
-    return dt
-
-
-def add_target(bin_id: str, target: int):
-    """Add a target number to an IFCB bin ID."""
-    return f"{bin_id}_{target:05d}"
-
-
-def parse_target(roi_id: str):
-    """Parse an IFCB ROI ID into (bin_id, target)."""
-    import re
-    pattern = r'^(IFCB\d+_\d{4}_\d{3}_\d{6}|D\d{8}T\d{6}_IFCB\d+)_(\d{5})$'
-    match = re.match(pattern, roi_id)
-    if not match:
-        raise ValueError(f'Invalid IFCB ROI ID format: {roi_id}')
-    bin_id = match.group(1)
-    target = int(match.group(2))
-    return bin_id, target
-
+    async def read_image(self, roi_id):
+        """Read a single ROI image by its ROI ID."""
+        bin_id, target_num = parse_roi_id(roi_id)
+        images = await self.read_images(bin_id, rois={target_num})
+        if target_num not in images:
+            raise KeyError(roi_id)
+        return images[target_num]
+    
 
 # product files access
 

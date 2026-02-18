@@ -1,165 +1,214 @@
-"""IFCB PID parsing, S3 key transformation, and S3 ROI utilities.
+"""
+IFCB bin ID and ROI ID parsing utilities.
 
-This module provides:
-- PID parsing for IFCB identifiers
-- PID to S3 key transformation for use with KeyTransformingStore
-- S3 ROI listing utilities
+This module provides functions for parsing and transforming IFCB bin IDs (PIDs/LIDs)
+and ROI IDs (target IDs) in both "I" style and "D" style formats.
 
-Supports both V1 and V2 IFCB PID formats:
-- V2: D20160714T023910_IFCB101_00014
-- V1: IFCB3_2008_013_423456_00014
+I-style format: IFCB{n}_{yyyy}_{ddd}_{hh}{mm}{ss}
+D-style format: D{yyyy}{mm}{dd}T{hh}{mm}{ss}_IFCB{n}
+
+ROI IDs append a 5-digit target number: {bin_id}_{nnnnn}
 """
 
 import re
+from datetime import datetime, timedelta, timezone
+from typing import Tuple
 
 
-def parse_ifcb_pid(pid: str) -> dict:
-    """Parse an IFCB PID to extract bin_lid and target.
+# Regex patterns for bin ID formats
+I_STYLE_PATTERN = re.compile(r'^IFCB(\d+)_(\d{4})_(\d{3})_(\d{2})(\d{2})(\d{2})$')
+D_STYLE_PATTERN = re.compile(r'^D(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})_IFCB(\d+)$')
+ROI_ID_PATTERN = re.compile(r'^(IFCB\d+_\d{4}_\d{3}_\d{6}|D\d{8}T\d{6}_IFCB\d+)_(\d{5})$')
 
-    Args:
-        pid: IFCB permanent identifier (may include path prefix,
-             product suffix, or file extension)
 
-    Returns:
-        dict with keys:
-            - 'bin_lid': The bin identifier (without target)
-            - 'target': The target number as an integer (or None if no target)
-
-    Raises:
-        ValueError: If the PID format is invalid
-
-    Examples:
-        >>> parse_ifcb_pid('D20160714T023910_IFCB101_00014.png')
-        {'bin_lid': 'D20160714T023910_IFCB101', 'target': 14}
-
-        >>> parse_ifcb_pid('IFCB3_2008_013_423456_00014')
-        {'bin_lid': 'IFCB3_2008_013_423456', 'target': 14}
-
-        >>> parse_ifcb_pid('/path/to/D20160714T023910_IFCB101.adc')
-        {'bin_lid': 'D20160714T023910_IFCB101', 'target': None}
+def parse_i_style_bin_id(bin_id: str) -> dict:
     """
-    # Strip Windows directory prefixes and path components
-    pid = re.sub(r'^.*\\', '', pid)  # Remove Windows paths
-    pid = re.sub(r'^.*/', '', pid)    # Remove Unix paths
+    Parse an I-style bin ID in the form 'IFCB{n}_{yyyy}_{ddd}_{hh}{mm}{ss}'.
 
-    # V2 pattern: D<yyyymmddTHHMMSS>_IFCB<###>[_<target>][_<product>][.<ext>]
-    v2_pattern = r'^(D\d{8}T\d{6}_IFCB\d+)(?:_(\d+))?(?:_[a-zA-Z][a-zA-Z0-9_]*)?(?:\.[a-zA-Z][a-zA-Z0-9]*)?$'
-    match = re.match(v2_pattern, pid)
-
-    if match:
-        bin_lid = match.group(1)
-        target = int(match.group(2)) if match.group(2) else None
-        return {'bin_lid': bin_lid, 'target': target}
-
-    # V1 pattern: IFCB<#>_<yyyy>_<DDD>_<HHMMSS>[_<target>][_<product>][.<ext>]
-    v1_pattern = r'^(IFCB\d+_\d{4}_\d{3}_\d{6})(?:_(\d+))?(?:_[a-zA-Z][a-zA-Z0-9_]*)?(?:\.[a-zA-Z][a-zA-Z0-9]*)?$'
-    match = re.match(v1_pattern, pid)
-
-    if match:
-        bin_lid = match.group(1)
-        target = int(match.group(2)) if match.group(2) else None
-        return {'bin_lid': bin_lid, 'target': target}
-
-    raise ValueError(f'Invalid IFCB PID format: {pid}')
-
-
-class IfcbPidTransformer:
-    """Transforms IFCB PIDs to/from S3 keys for use with KeyTransformingStore.
-
-    Transforms PIDs like 'D20250114T172241_IFCB109_00002' to S3 keys like
-    '2025/D20250114T172241_IFCB109/00002.png'.
-
-    For adding a prefix, compose this with PrefixKeyTransformer from storage.utils.
+    :param bin_id: the bin ID string
+    :returns: dict with instrument_id, year, day_of_year, hour, minute, second
+    :raises ValueError: if the format is invalid
     """
-
-    def transform_key(self, pid: str) -> str:
-        """Transform IFCB PID to S3 key.
-
-        Args:
-            pid: IFCB PID like 'D20250114T172241_IFCB109_00002'
-
-        Returns:
-            S3 key like '2025/D20250114T172241_IFCB109/00002.png'
-        """
-        parsed = parse_ifcb_pid(pid)
-        bin_lid = parsed['bin_lid']
-        roi_number = parsed['target']
-
-        # Extract year from bin_lid
-        if bin_lid.startswith("D") and len(bin_lid) >= 5:
-            year = bin_lid[1:5]  # D20250114... -> 2025
-        else:
-            year = "legacy"
-
-        return f"{year}/{bin_lid}/{roi_number:05d}.png"
-
-    def reverse_transform_key(self, s3_key: str) -> str:
-        """Transform S3 key back to IFCB PID.
-
-        Args:
-            s3_key: S3 key like '2025/D20250114T172241_IFCB109/00002.png'
-
-        Returns:
-            IFCB PID like 'D20250114T172241_IFCB109_00002'
-        """
-        parts = s3_key.split('/')
-        if len(parts) < 3:
-            raise ValueError(f"Invalid S3 key format: {s3_key}")
-
-        # parts: ['2025', 'D20250114T172241_IFCB109', '00002.png']
-        bin_lid = parts[-2]
-        filename = parts[-1]
-
-        # Remove .png extension and parse ROI number
-        if not filename.endswith('.png'):
-            raise ValueError(f"Expected .png file, got: {filename}")
-        roi_number = filename[:-4]
-
-        return f"{bin_lid}_{roi_number}"
+    match = I_STYLE_PATTERN.match(bin_id)
+    if not match:
+        raise ValueError(f'Invalid IFCB I-style bin ID format: {bin_id}')
+    return {
+        'instrument_id': int(match.group(1)),
+        'year': int(match.group(2)),
+        'day_of_year': int(match.group(3)),
+        'hour': int(match.group(4)),
+        'minute': int(match.group(5)),
+        'second': int(match.group(6)),
+    }
 
 
-def list_roi_ids_from_s3(bucket_store, bin_id: str, prefix: str = "") -> list:
-    """List ROI IDs for a given bin from S3.
-
-    Args:
-        bucket_store: BucketStore instance for S3 access
-        bin_id: IFCB bin ID (e.g., 'D20250114T172241_IFCB109')
-        prefix: Optional S3 key prefix (e.g., 'ifcb_data')
-
-    Returns:
-        List of ROI IDs like ['D20250114T172241_IFCB109_00001', ...]
-
-    S3 structure: {prefix}/{year}/{bin_lid}/{roi_number:05d}.png
-    Example: ifcb_data/2025/D20250114T172241_IFCB109/00002.png
+def parse_d_style_bin_id(bin_id: str) -> dict:
     """
-    # Extract year from bin_id
-    if bin_id.startswith("D") and len(bin_id) >= 5:
-        year = bin_id[1:5]  # D20250114... -> 2025
+    Parse a D-style bin ID in the form 'D{yyyy}{mm}{dd}T{hh}{mm}{ss}_IFCB{n}'.
+
+    :param bin_id: the bin ID string
+    :returns: dict with instrument_id, year, month, day, hour, minute, second
+    :raises ValueError: if the format is invalid
+    """
+    match = D_STYLE_PATTERN.match(bin_id)
+    if not match:
+        raise ValueError(f'Invalid IFCB D-style bin ID format: {bin_id}')
+    return {
+        'instrument_id': int(match.group(7)),
+        'year': int(match.group(1)),
+        'month': int(match.group(2)),
+        'day': int(match.group(3)),
+        'hour': int(match.group(4)),
+        'minute': int(match.group(5)),
+        'second': int(match.group(6)),
+    }
+
+
+def parse_bin_id(bin_id: str) -> dict:
+    """
+    Parse an IFCB bin ID in either I-style or D-style format.
+
+    :param bin_id: the bin ID string
+    :returns: dict with parsed components (format varies by style)
+    :raises ValueError: if the format is invalid
+    """
+    if bin_id.startswith('D'):
+        return parse_d_style_bin_id(bin_id)
+    elif bin_id.startswith('I'):
+        return parse_i_style_bin_id(bin_id)
     else:
-        year = "legacy"
+        raise ValueError(f'Invalid IFCB bin ID format: {bin_id}')
 
-    # Construct S3 prefix
-    prefix = prefix.rstrip("/") if prefix else ""
-    if prefix:
-        search_prefix = f"{prefix}/{year}/{bin_id}/"
+
+def bin_timestamp(bin_id: str) -> datetime:
+    """
+    Extract a UTC timestamp from an IFCB bin ID.
+
+    :param bin_id: the bin ID string
+    :returns: datetime object in UTC
+    :raises ValueError: if the format is invalid
+    """
+    parsed = parse_bin_id(bin_id)
+    if 'day_of_year' in parsed:
+        # I-style: use day of year
+        dt = datetime(parsed['year'], 1, 1, tzinfo=timezone.utc) + timedelta(days=parsed['day_of_year'] - 1)
+        dt = dt.replace(hour=parsed['hour'], minute=parsed['minute'], second=parsed['second'])
     else:
-        search_prefix = f"{year}/{bin_id}/"
+        # D-style: use month and day
+        dt = datetime(
+            parsed['year'],
+            parsed['month'],
+            parsed['day'],
+            parsed['hour'],
+            parsed['minute'],
+            parsed['second'],
+            tzinfo=timezone.utc,
+        )
+    return dt
 
-    roi_ids = []
-    for key in bucket_store.keys(prefix=search_prefix):
-        filename = key.split("/")[-1]
-        if not filename.endswith(".png"):
-            continue
 
-        # Parse filename: {target:05d}.png
-        # Example: 00002.png
-        try:
-            # Remove .png extension and parse as integer
-            target_str = filename[:-4]
-            target = int(target_str)
-            roi_ids.append(f"{bin_id}_{target:05d}")
-        except ValueError:
-            continue
+def bin_day_dir(bin_id: str) -> str:
+    """
+    Get the day directory name for a bin ID (e.g., 'D20210101' for D-style).
 
-    roi_ids.sort()
-    return roi_ids
+    :param bin_id: the bin ID string
+    :returns: day directory string in the form 'D{yyyymmdd}'
+    :raises ValueError: if the format is invalid
+    """
+    ts = bin_timestamp(bin_id)
+    return ts.strftime('D%Y%m%d')
+
+
+def bin_year(bin_id: str) -> int:
+    """
+    Extract the year from an IFCB bin ID.
+
+    :param bin_id: the bin ID string
+    :returns: year as integer
+    :raises ValueError: if the format is invalid
+    """
+    parsed = parse_bin_id(bin_id)
+    return parsed['year']
+
+
+def bin_instrument_id(bin_id: str) -> int:
+    """
+    Extract the instrument ID from an IFCB bin ID.
+
+    :param bin_id: the bin ID string
+    :returns: instrument ID as integer
+    :raises ValueError: if the format is invalid
+    """
+    parsed = parse_bin_id(bin_id)
+    return parsed['instrument_id']
+
+
+def add_target(bin_id: str, target: int) -> str:
+    """
+    Add a target number to an IFCB bin ID to create an ROI ID.
+
+    :param bin_id: the bin ID string
+    :param target: the target number (1-based)
+    :returns: ROI ID string in the form '{bin_id}_{nnnnn}'
+    """
+    return f"{bin_id}_{target:05d}"
+
+
+def parse_roi_id(roi_id: str) -> Tuple[str, int]:
+    """
+    Parse an IFCB ROI ID into (bin_id, target).
+
+    :param roi_id: the ROI ID string
+    :returns: tuple of (bin_id, target_number)
+    :raises ValueError: if the format is invalid
+    """
+    match = ROI_ID_PATTERN.match(roi_id)
+    if not match:
+        raise ValueError(f'Invalid IFCB ROI ID format: {roi_id}')
+    bin_id = match.group(1)
+    target = int(match.group(2))
+    return bin_id, target
+
+
+# Alias for backward compatibility
+parse_target = parse_roi_id
+
+
+def parse_pid(pid: str) -> dict:
+    """
+    Parse a PID (bin ID or ROI ID) and return a comprehensive dict.
+
+    This function handles both bin IDs and ROI IDs, returning a dict
+    with all parsed components plus derived values like timestamp and day_dir.
+
+    :param pid: the PID string (bin ID or ROI ID)
+    :returns: dict with lid, timestamp, year, day_dir, instrument_id, and optionally target
+    :raises ValueError: if the format is invalid
+    """
+    # Check if it's an ROI ID (has target suffix)
+    roi_match = ROI_ID_PATTERN.match(pid)
+    if roi_match:
+        bin_id = roi_match.group(1)
+        target = int(roi_match.group(2))
+    else:
+        bin_id = pid
+        target = None
+
+    parsed = parse_bin_id(bin_id)
+    ts = bin_timestamp(bin_id)
+
+    result = {
+        'lid': bin_id,
+        'timestamp': ts,
+        'year': parsed['year'],
+        'day_dir': bin_day_dir(bin_id),
+        'instrument_id': parsed['instrument_id'],
+    }
+
+    if target is not None:
+        result['target'] = target
+        result['roi_id'] = pid
+
+    return result
+
+

@@ -15,7 +15,7 @@ services:
 
   redis:
     image: redis:8-alpine
-    command: redis-server --maxmemory 2gb --maxmemory-policy allkeys-lru
+    command: redis-server --maxmemory ${REDIS_MAX_MEMORY:-512mb} --maxmemory-policy allkeys-lru
     volumes:
       - redis_data:/data
     healthcheck:
