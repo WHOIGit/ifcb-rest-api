@@ -148,10 +148,10 @@ class CachingRoiStore(AsyncRoiStore):
     write to both cache and S3.
     cache should be bounded in size and evict old items as needed (redis?)
     """
-    def __init__(self, cache: AsyncRoiStore | None = AsyncDictRoiStore(),
+    def __init__(self, cache: AsyncRoiStore | None = None,
                  s3: AsyncS3RoiStore | None = None,
                  fs: AsyncFilesystemRoiStore | None = None):
-        self.cache_store = cache
+        self.cache_store = cache if cache is not None else AsyncDictRoiStore()
         self.s3_store = s3
         self.fs_store = fs
 
