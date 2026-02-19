@@ -255,6 +255,8 @@ class CachingBinStore(AsyncBinStore):
         fs: AsyncBinStore | None = None,
         s3: AsyncS3BinStore | None = None,
     ):
+        if not fs and not s3:
+            raise ValueError("CachingBinStore requires at least one of fs or s3")
         self.fs = fs
         self.s3 = s3
 
