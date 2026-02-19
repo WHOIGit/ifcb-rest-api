@@ -98,3 +98,15 @@ def parse_hdr_file(path):
     """
     lines = list(fileinput.FileInput(path))
     return parse_hdr(lines)
+
+
+def parse_hdr_bytes(content: bytes) -> dict:
+    """
+    Given the bytes of a header file, return the header properties.
+
+    :param content: bytes of the header file
+    :returns dict: the header properties
+    :see parse_hdr
+    """
+    lines = content.decode('utf-8', errors='replace').splitlines()
+    return parse_hdr(lines)

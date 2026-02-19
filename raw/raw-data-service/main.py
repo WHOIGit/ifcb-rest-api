@@ -13,7 +13,7 @@ from storage.s3 import BucketStore
 from storage.redis import AsyncRedisStore
 
 from .roistores import AsyncS3RoiStore, AsyncFilesystemRoiStore, CachingRoiStore
-from .ifcb import AsyncIfcbDataDirectory
+from .binstores import AsyncFilesystemBinStore, AsyncS3BinStore, CachingBinStore
 from .processor import RawProcessor
 from .redis_client import get_redis_client, close_redis_client
 
@@ -139,9 +139,6 @@ auth_client = AuthClient(auth_service_url=auth_service_url)
 async def lifespan(app: FastAPI):
     print('initializing RawProcessor...')
     raw_data_dir = "/data/raw"  # Always mounted here in container
-    app.state.data_dir = AsyncIfcbDataDirectory(raw_data_dir)
-    # Metadata lookup does not require local .roi files
-    app.state.roi_meta_dir = AsyncIfcbDataDirectory(raw_data_dir, require_roi=False)
     # Redis client
     app.state.redis_client = await get_redis_client()
 
@@ -150,6 +147,7 @@ async def lifespan(app: FastAPI):
     s3_access_key = os.getenv("S3_ACCESS_KEY")
     s3_secret_key = os.getenv("S3_SECRET_KEY")
     s3_prefix = os.getenv("S3_PREFIX", "")
+    s3_raw_prefix = os.getenv("S3_RAW_PREFIX", "")
     s3_concurrent_requests = int(os.getenv("S3_CONCURRENT_REQUESTS", "50"))
 
     s3_configured = all([s3_bucket, s3_access_key, s3_secret_key])
@@ -176,13 +174,28 @@ async def lifespan(app: FastAPI):
             s3_client=app.state.s3_client,
             s3_prefix=s3_prefix,
         )
-    
+
     if fs_configured:
         app.state.fs_roi_store = AsyncFilesystemRoiStore(raw_data_dir, file_type="png")
-        app.state.roi_fs_dir = AsyncIfcbDataDirectory(raw_data_dir)
 
+    fs_bin_store = AsyncFilesystemBinStore(raw_data_dir) if fs_configured else None
+    s3_bin_store = AsyncS3BinStore(
+        s3_bucket=s3_bucket,
+        s3_client=app.state.s3_client,
+        s3_prefix=s3_raw_prefix,
+    ) if s3_configured else None
+    if fs_bin_store and s3_bin_store:
+        app.state.bin_store = CachingBinStore(fs=fs_bin_store, s3=s3_bin_store)
+    elif fs_bin_store:
+        app.state.bin_store = fs_bin_store
+    elif s3_bin_store:
+        app.state.bin_store = s3_bin_store
+    else:
+        app.state.bin_store = None
+
+    redis_cache = AsyncRedisStore(app.state.redis_client) if app.state.redis_client else None
     app.state.roi_store = CachingRoiStore(
-        cache=AsyncRedisStore(app.state.redis_client),
+        cache=redis_cache,
         s3=app.state.s3_roi_store,
         fs=app.state.fs_roi_store,
     )
