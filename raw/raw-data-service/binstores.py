@@ -334,10 +334,17 @@ class CachingBinStore(AsyncBinStore):
         return None
 
     async def iter_images(self, bin_id: str, rois=None):
+        # Prefer filesystem for memory-efficient seek-based reads, but fall
+        # back to S3 on a miss (e.g. bins that were rotated off the filesystem
+        # after being promoted to S3).  KeyError from the filesystem store is
+        # only ever raised before any yields, so catching it here is safe.
         if self.fs:
-            async for item in self.fs.iter_images(bin_id, rois=rois):
-                yield item
-            return
+            try:
+                async for item in self.fs.iter_images(bin_id, rois=rois):
+                    yield item
+                return
+            except KeyError:
+                pass
         if self.s3:
             async for item in self.s3.iter_images(bin_id, rois=rois):
                 yield item
