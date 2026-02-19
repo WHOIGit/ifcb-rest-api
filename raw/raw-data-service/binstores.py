@@ -168,17 +168,17 @@ class AsyncFilesystemBinStore(AsyncBinStore):
         async with aiofiles.open(path, 'rb') as f:
             return await f.read()
 
-    async def read_images(self, bin_id: str, rois=None) -> dict:
-        """Override to keep the .roi file open across all seeks (more efficient than loading into memory)."""
+    async def _iter_raw(self, bin_id: str, rois=None):
+        """Async generator yielding (target_num, PIL.Image) pairs.
+
+        Keeps both .adc and .roi files open across all seeks, avoiding loading
+        the full .roi file into memory.
+        """
         adc_path = await self._find_path(bin_id, 'adc')
         roi_path = await self._find_path(bin_id, 'roi')
         if adc_path is None or roi_path is None:
             raise KeyError(bin_id)
-        if bin_id.startswith('I'):
-            w_col, h_col, offset_col = 11, 12, 13
-        else:
-            w_col, h_col, offset_col = 15, 16, 17
-        images = {}
+        w_col, h_col, offset_col = (11, 12, 13) if bin_id.startswith('I') else (15, 16, 17)
         async with aiofiles.open(roi_path, 'rb') as roi_file:
             async with aiofiles.open(adc_path, 'r') as adc_file:
                 i = 0
@@ -187,63 +187,29 @@ class AsyncFilesystemBinStore(AsyncBinStore):
                     try:
                         width = int(fields[w_col])
                         height = int(fields[h_col])
+                        offset = int(fields[offset_col])
                     except (ValueError, IndexError):
                         i += 1
                         continue
-                    if rois is not None and (i + 1) not in rois:
-                        pass
-                    elif width == 0 or height == 0:
-                        pass
-                    else:
-                        offset = int(fields[offset_col])
+                    if (rois is None or (i + 1) in rois) and width > 0 and height > 0:
                         await roi_file.seek(offset)
                         data = await roi_file.read(width * height)
                         image = await asyncio.to_thread(
                             Image.frombuffer, 'L', (width, height), data, 'raw', 'L', 0, 1
                         )
-                        images[i + 1] = image
+                        yield i + 1, image
                     i += 1
-        return images
+
+    async def read_images(self, bin_id: str, rois=None) -> dict:
+        return {num: img async for num, img in self._iter_raw(bin_id, rois=rois)}
 
     async def get_path(self, key: str) -> str | None:
         bin_id, ext = key.rsplit('.', 1)
         return await self._find_path(bin_id, ext)
 
     async def iter_images(self, bin_id: str, rois=None):
-        """Stream ROI images one at a time, keeping both files open across seeks."""
-        adc_path = await self._find_path(bin_id, 'adc')
-        roi_path = await self._find_path(bin_id, 'roi')
-        if adc_path is None or roi_path is None:
-            raise KeyError(bin_id)
-        if bin_id.startswith('I'):
-            w_col, h_col, offset_col = 11, 12, 13
-        else:
-            w_col, h_col, offset_col = 15, 16, 17
-        async with aiofiles.open(roi_path, 'rb') as roi_file:
-            async with aiofiles.open(adc_path, 'r') as adc_file:
-                i = 0
-                async for line in adc_file:
-                    fields = line.strip().split(',')
-                    try:
-                        width = int(fields[w_col])
-                        height = int(fields[h_col])
-                    except (ValueError, IndexError):
-                        i += 1
-                        continue
-                    if rois is not None and (i + 1) not in rois:
-                        i += 1
-                        continue
-                    if width == 0 or height == 0:
-                        i += 1
-                        continue
-                    offset = int(fields[offset_col])
-                    await roi_file.seek(offset)
-                    data = await roi_file.read(width * height)
-                    image = await asyncio.to_thread(
-                        Image.frombuffer, 'L', (width, height), data, 'raw', 'L', 0, 1
-                    )
-                    yield add_target(bin_id, i + 1), image
-                    i += 1
+        async for num, img in self._iter_raw(bin_id, rois=rois):
+            yield add_target(bin_id, num), img
 
 
 class AsyncS3BinStore(AsyncBinStore):
@@ -317,13 +283,14 @@ class CachingBinStore(AsyncBinStore):
     async def read_images(self, bin_id: str, rois=None) -> dict:
         """Delegate to the most efficient available store.
 
-        Prefers the filesystem store when present because AsyncFilesystemBinStore
-        keeps the .roi file open across all seeks rather than loading the full
-        file into memory. Falls back to S3 (full byte load) only when no
-        filesystem store is configured.
+        Prefers the filesystem store (seek-based, no full .roi load into memory).
+        Falls back to S3 if the bin is absent from the filesystem.
         """
         if self.fs:
-            return await self.fs.read_images(bin_id, rois=rois)
+            try:
+                return await self.fs.read_images(bin_id, rois=rois)
+            except KeyError:
+                pass
         if self.s3:
             return await self.s3.read_images(bin_id, rois=rois)
         raise KeyError(bin_id)
