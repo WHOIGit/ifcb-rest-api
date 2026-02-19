@@ -60,6 +60,7 @@ services:
       GLOBAL_CAPACITY_LIMIT: ${GLOBAL_CAPACITY_LIMIT:-100}
       # CAPACITY_GROUPS: '{"fast": 40, "slow": 5}'  # Optional JSON config
       CAPACITY_RETRY_AFTER: ${CAPACITY_RETRY_AFTER:-1}
+      # CAPACITY_RETRY_AFTER_GROUPS: '{"fast": 1, "slow": 30}'  # Optional per-group overrides
     command: gunicorn raw-data-service.main:app --workers ${GUNICORN_WORKERS:-50} --worker-class uvicorn.workers.UvicornWorker --backlog 8192 --bind 0.0.0.0:${PORT:-8001} --timeout ${GUNICORN_TIMEOUT:-120}
     volumes:
       - ${HOST_IFCB_RAW_DATA_DIR}:/data/raw:ro

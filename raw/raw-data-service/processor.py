@@ -99,6 +99,14 @@ class RawProcessor(BaseProcessor):
         self.capacity_retry_after = int(os.getenv("CAPACITY_RETRY_AFTER", "1"))
         self.capacity_key_ttl = int(os.getenv("CAPACITY_KEY_TTL", "30"))
 
+        # Per-group retry-after overrides; falls back to capacity_retry_after
+        # e.g. CAPACITY_RETRY_AFTER_GROUPS='{"fast": 1, "slow": 30}'
+        retry_after_groups_json = os.getenv("CAPACITY_RETRY_AFTER_GROUPS")
+        if retry_after_groups_json:
+            self.capacity_retry_after_groups = {k: int(v) for k, v in json.loads(retry_after_groups_json).items()}
+        else:
+            self.capacity_retry_after_groups = {}
+
     @property
     def name(self) -> str:
         return "raw-data-server"
@@ -203,10 +211,11 @@ class RawProcessor(BaseProcessor):
                 # Over capacity - rollback and reject
                 await redis_client.decr(redis_key)
                 logger.warning(f"[CAPACITY] Group '{group}' exceeded: {new_count}/{max_concurrent} - returning 429")
+                retry_after = self.capacity_retry_after_groups.get(group, self.capacity_retry_after)
                 raise HTTPException(
                     status_code=429,
                     detail={"error": "Too many concurrent requests", "group": group, "limit": max_concurrent},
-                    headers={"Retry-After": str(self.capacity_retry_after)},
+                    headers={"Retry-After": str(retry_after)},
                 )
 
             acquired = True
