@@ -256,6 +256,20 @@ class CachingBinStore(AsyncBinStore):
             return data
         raise KeyError(key)
 
+    async def read_images(self, bin_id: str, rois=None) -> dict:
+        """Delegate to the most efficient available store.
+
+        Prefers the filesystem store when present because AsyncFilesystemBinStore
+        keeps the .roi file open across all seeks rather than loading the full
+        file into memory. Falls back to S3 (full byte load) only when no
+        filesystem store is configured.
+        """
+        if self.fs:
+            return await self.fs.read_images(bin_id, rois=rois)
+        if self.s3:
+            return await self.s3.read_images(bin_id, rois=rois)
+        raise KeyError(bin_id)
+
     async def put(self, key: str, data: bytes) -> None:
         if self.s3:
             await self.s3.put(key, data)

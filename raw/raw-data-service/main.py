@@ -184,10 +184,18 @@ async def lifespan(app: FastAPI):
         s3_client=app.state.s3_client,
         s3_prefix=s3_raw_prefix,
     ) if s3_configured else None
-    app.state.bin_store = CachingBinStore(fs=fs_bin_store, s3=s3_bin_store) if (fs_bin_store or s3_bin_store) else None
+    if fs_bin_store and s3_bin_store:
+        app.state.bin_store = CachingBinStore(fs=fs_bin_store, s3=s3_bin_store)
+    elif fs_bin_store:
+        app.state.bin_store = fs_bin_store
+    elif s3_bin_store:
+        app.state.bin_store = s3_bin_store
+    else:
+        app.state.bin_store = None
 
+    redis_cache = AsyncRedisStore(app.state.redis_client) if app.state.redis_client else None
     app.state.roi_store = CachingRoiStore(
-        cache=AsyncRedisStore(app.state.redis_client),
+        cache=redis_cache,
         s3=app.state.s3_roi_store,
         fs=app.state.fs_roi_store,
     )
