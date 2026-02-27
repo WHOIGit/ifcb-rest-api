@@ -8,7 +8,8 @@ import redis.asyncio as redis
 import botocore
 import boto3
 
-from stateless_microservice import ServiceConfig, create_app, AuthClient
+from stateless_microservice import ServiceConfig, create_app
+from amplify_auth import AuthClient
 from storage.s3 import BucketStore
 from storage.redis import AsyncRedisStore
 
