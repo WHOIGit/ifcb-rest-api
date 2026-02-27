@@ -1,21 +1,27 @@
 """FastAPI entrypoint for the IFCB raw data service."""
 from contextlib import asynccontextmanager
+import asyncio
+from io import BytesIO
+import json
 import logging
 import os
-from fastapi import FastAPI
-import redis.asyncio as redis
+from typing import Annotated
 
 import botocore
 import boto3
+from fastapi import Depends, FastAPI, HTTPException, Request
+from PIL import Image
+import redis.asyncio as redis
 
-from stateless_microservice import ServiceConfig, create_app
 from amplify_auth import AuthClient
 from storage.s3 import BucketStore
 from storage.redis import AsyncRedisStore
 
 from .roistores import AsyncS3RoiStore, AsyncFilesystemRoiStore, CachingRoiStore
-from .binstores import AsyncFilesystemBinStore, AsyncS3BinStore, CachingBinStore
-from .processor import RawProcessor
+from .binstores import AsyncFilesystemBinStore, AsyncS3BinStore, CachingBinStore, build_bin_archive, build_roi_archive
+from .models import RawBinParams, RawBinArchiveParams, BinIDParams, ROIImageParams, ROIArchiveParams
+from .processor import capacity_limited, CAPACITY_FAST, CAPACITY_SLOW, render_bytes
+from .ifcbhdr import parse_hdr_bytes
 from .redis_client import get_redis_client, close_redis_client
 
 logger = logging.getLogger(__name__)
@@ -128,8 +134,6 @@ class GlobalCapacityMiddleware:
         })
 
 
-config = ServiceConfig(description="IFCB raw data service.")
-
 auth_service_url = os.getenv("AUTH_SERVICE_URL")
 if not auth_service_url:
     raise ValueError("AUTH_SERVICE_URL environment variable is required")
@@ -138,10 +142,20 @@ auth_client = AuthClient(auth_service_url=auth_service_url)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print('initializing RawProcessor...')
     raw_data_dir = "/data/raw"  # Always mounted here in container
     # Redis client
     app.state.redis_client = await get_redis_client()
+
+    # Capacity config
+    groups_json = os.getenv("CAPACITY_GROUPS")
+    app.state.capacity_groups = json.loads(groups_json) if groups_json else {"fast": 40, "slow": 5}
+    app.state.capacity_retry_after = int(os.getenv("CAPACITY_RETRY_AFTER", "1"))
+    app.state.capacity_key_ttl = int(os.getenv("CAPACITY_KEY_TTL", "30"))
+    retry_after_groups_json = os.getenv("CAPACITY_RETRY_AFTER_GROUPS")
+    app.state.capacity_retry_after_groups = (
+        {k: int(v) for k, v in json.loads(retry_after_groups_json).items()}
+        if retry_after_groups_json else {}
+    )
 
     s3_bucket = os.getenv("S3_BUCKET_NAME")
     s3_endpoint = os.getenv("S3_ENDPOINT_URL")
@@ -206,10 +220,127 @@ async def lifespan(app: FastAPI):
     # cleanup
     await close_redis_client()
 
-app = create_app(RawProcessor(), config, auth_client=auth_client, lifespan=lifespan)
+
+_inner_app = FastAPI(
+    title="raw-data-server",
+    description="IFCB raw data service.",
+    lifespan=lifespan,
+)
+
+_auth = Depends(auth_client.require_scopes(["ifcb:raw:read"]))
+
+_ROI_IMAGE_EXPIRES = 'Fri, 01 Jan 2038 00:00:00 GMT'
+_RAW_FILE_MEDIA_TYPES = {"hdr": "text/plain", "adc": "text/csv", "roi": "application/octet-stream"}
+_BIN_ARCHIVE_MEDIA_TYPES = {"zip": "application/zip", "tgz": "application/gzip"}
+_ROI_IMAGE_MEDIA_TYPES = {"png": "image/png", "jpg": "image/jpeg"}
+_ROI_ARCHIVE_MEDIA_TYPES = {"zip": "application/zip", "tar": "application/x-tar"}
+
+
+async def _jpeg_from_png(png_bytes: bytes) -> bytes:
+    buf = BytesIO()
+    image = Image.open(BytesIO(png_bytes))
+    await asyncio.to_thread(image.convert("RGB").save, buf, format="JPEG")
+    buf.seek(0)
+    return buf.getvalue()
+
+
+@_inner_app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@_inner_app.get("/data/raw/{bin_id}.{extension}", tags=["IFCB"], summary="Serve a raw IFCB file.")
+async def raw_file(
+    request: Request,
+    path_params: Annotated[RawBinParams, Depends()],
+    token_info=_auth,
+    _cap=capacity_limited(CAPACITY_FAST),
+):
+    try:
+        content = await request.app.state.bin_store.get(f"{path_params.bin_id}.{path_params.extension}")
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Bin ID {path_params.bin_id} not found.")
+    return render_bytes(content, _RAW_FILE_MEDIA_TYPES[path_params.extension])
+
+
+@_inner_app.get("/data/archive/{bin_id}.{extension}", tags=["IFCB"], summary="Serve raw IFCB bin files in an archive.")
+async def raw_archive_file(
+    request: Request,
+    path_params: Annotated[RawBinArchiveParams, Depends()],
+    token_info=_auth,
+    _cap=capacity_limited(CAPACITY_SLOW),
+):
+    try:
+        buf = await build_bin_archive(request.app.state.bin_store, path_params.bin_id, path_params.extension)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Bin ID {path_params.bin_id} not found.")
+    return render_bytes(buf, _BIN_ARCHIVE_MEDIA_TYPES[path_params.extension])
+
+
+@_inner_app.get("/data/rois/{bin_id}.json", tags=["IFCB"], summary="Serve list of ROI IDs associated with the bin.")
+async def roi_ids(
+    request: Request,
+    path_params: Annotated[BinIDParams, Depends()],
+    token_info=_auth,
+    _cap=capacity_limited(CAPACITY_FAST),
+):
+    try:
+        return await request.app.state.bin_store.list_images(path_params.bin_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Bin ID {path_params.bin_id} not found.")
+
+
+@_inner_app.get("/metadata/raw/{bin_id}.json", tags=["IFCB"], summary="Serve metadata from the header file.")
+async def metadata(
+    request: Request,
+    path_params: Annotated[BinIDParams, Depends()],
+    token_info=_auth,
+    _cap=capacity_limited(CAPACITY_FAST),
+):
+    try:
+        hdr_bytes = await request.app.state.bin_store.get(f"{path_params.bin_id}.hdr")
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Bin ID {path_params.bin_id} not found.")
+    return await asyncio.to_thread(parse_hdr_bytes, hdr_bytes)
+
+
+@_inner_app.get("/image/roi/{roi_id}.{extension}", tags=["IFCB"], summary="Serve a specified ROI.")
+async def roi_image(
+    request: Request,
+    path_params: Annotated[ROIImageParams, Depends()],
+    token_info=_auth,
+    _cap=capacity_limited(CAPACITY_FAST),
+):
+    try:
+        png_bytes = await request.app.state.roi_store.get(path_params.roi_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=f"ROI ID {path_params.roi_id} not found.") from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving ROI ID {path_params.roi_id}: {e}")
+    image_bytes = png_bytes if path_params.extension == "png" else await _jpeg_from_png(png_bytes)
+    return render_bytes(image_bytes, _ROI_IMAGE_MEDIA_TYPES[path_params.extension],
+                        headers={'Expires': _ROI_IMAGE_EXPIRES})
+
+
+@_inner_app.get("/image/rois/{bin_id}.{extension}", tags=["IFCB"], summary="Serve ROI images in a tar/zip archive.")
+async def roi_archive(
+    request: Request,
+    path_params: Annotated[ROIArchiveParams, Depends()],
+    token_info=_auth,
+    _cap=capacity_limited(CAPACITY_SLOW),
+):
+    store = request.app.state.bin_store
+    if store is None:
+        raise HTTPException(status_code=503, detail="Raw data store not configured, cannot serve ROI archives.")
+    try:
+        buf = await build_roi_archive(store, path_params.bin_id, path_params.extension)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Bin ID {path_params.bin_id} not found.")
+    return render_bytes(buf, _ROI_ARCHIVE_MEDIA_TYPES[path_params.extension])
+
 
 # Global capacity ceiling - runs before auth, prevents connection errors
 global_capacity = int(os.getenv("GLOBAL_CAPACITY_LIMIT", "100"))
 retry_after = int(os.getenv("CAPACITY_RETRY_AFTER", "1"))
 key_ttl = int(os.getenv("CAPACITY_KEY_TTL", "30"))
-app = GlobalCapacityMiddleware(app, max_concurrent=global_capacity, retry_after=retry_after, key_ttl=key_ttl)
+app = GlobalCapacityMiddleware(_inner_app, max_concurrent=global_capacity, retry_after=retry_after, key_ttl=key_ttl)
