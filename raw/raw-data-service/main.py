@@ -30,11 +30,8 @@ logger = logging.getLogger(__name__)
 class GlobalCapacityMiddleware:
     """ASGI middleware for global capacity limiting. Runs before auth."""
 
-    def __init__(self, app, max_concurrent: int = 100, retry_after: int = 1, key_ttl: int = 30):
+    def __init__(self, app):
         self.app = app
-        self.max_concurrent = max_concurrent
-        self.retry_after = retry_after
-        self.key_ttl = key_ttl
         self.redis_key = "ifcb_raw:capacity:global"
 
     async def __call__(self, scope, receive, send):
@@ -47,17 +44,22 @@ class GlobalCapacityMiddleware:
             await self.app(scope, receive, send)
             return
 
+        state = self.app.state
+        max_concurrent = getattr(state, 'global_capacity', 100)
+        retry_after = getattr(state, 'capacity_retry_after', 1)
+        key_ttl = getattr(state, 'capacity_key_ttl', 30)
+
         acquired = False
         response_started = False
 
         try:
             new_count = await redis_client.incr(self.redis_key)
-            await redis_client.expire(self.redis_key, self.key_ttl)
+            await redis_client.expire(self.redis_key, key_ttl)
 
-            if new_count > self.max_concurrent:
+            if new_count > max_concurrent:
                 await redis_client.decr(self.redis_key)
-                logger.warning(f"[GLOBAL CAPACITY] EXCEEDED: {new_count}/{self.max_concurrent} - returning 429")
-                await self._send_429(send)
+                logger.warning(f"[GLOBAL CAPACITY] EXCEEDED: {new_count}/{max_concurrent} - returning 429")
+                await self._send_429(send, retry_after)
                 return
 
             acquired = True
@@ -90,13 +92,13 @@ class GlobalCapacityMiddleware:
                 except redis.RedisError as e:
                     logger.error(f"[GLOBAL CAPACITY] Failed to decrement: {e}")
 
-    async def _send_429(self, send):
+    async def _send_429(self, send, retry_after: int):
         await send({
             "type": "http.response.start",
             "status": 429,
             "headers": [
                 (b"content-type", b"application/json"),
-                (b"retry-after", str(self.retry_after).encode()),
+                (b"retry-after", str(retry_after).encode()),
             ],
         })
         await send({
@@ -146,11 +148,12 @@ async def lifespan(app: FastAPI):
     # Redis client
     app.state.redis_client = await get_redis_client()
 
-    # Capacity config
+    # Capacity config (shared by GlobalCapacityMiddleware and capacity_limited dep)
     groups_json = os.getenv("CAPACITY_GROUPS")
     app.state.capacity_groups = json.loads(groups_json) if groups_json else {"fast": 40, "slow": 5}
     app.state.capacity_retry_after = int(os.getenv("CAPACITY_RETRY_AFTER", "1"))
     app.state.capacity_key_ttl = int(os.getenv("CAPACITY_KEY_TTL", "30"))
+    app.state.global_capacity = int(os.getenv("GLOBAL_CAPACITY_LIMIT", "100"))
     retry_after_groups_json = os.getenv("CAPACITY_RETRY_AFTER_GROUPS")
     app.state.capacity_retry_after_groups = (
         {k: int(v) for k, v in json.loads(retry_after_groups_json).items()}
@@ -256,6 +259,8 @@ async def raw_file(
     token_info=_auth,
     _cap=capacity_limited(CAPACITY_FAST),
 ):
+    if request.app.state.bin_store is None:
+        raise HTTPException(status_code=503, detail="Raw data store not configured.")
     try:
         content = await request.app.state.bin_store.get(f"{path_params.bin_id}.{path_params.extension}")
     except KeyError:
@@ -270,6 +275,8 @@ async def raw_archive_file(
     token_info=_auth,
     _cap=capacity_limited(CAPACITY_SLOW),
 ):
+    if request.app.state.bin_store is None:
+        raise HTTPException(status_code=503, detail="Raw data store not configured.")
     try:
         buf = await build_bin_archive(request.app.state.bin_store, path_params.bin_id, path_params.extension)
     except KeyError:
@@ -284,6 +291,8 @@ async def roi_ids(
     token_info=_auth,
     _cap=capacity_limited(CAPACITY_FAST),
 ):
+    if request.app.state.bin_store is None:
+        raise HTTPException(status_code=503, detail="Raw data store not configured.")
     try:
         return await request.app.state.bin_store.list_images(path_params.bin_id)
     except KeyError:
@@ -297,6 +306,8 @@ async def metadata(
     token_info=_auth,
     _cap=capacity_limited(CAPACITY_FAST),
 ):
+    if request.app.state.bin_store is None:
+        raise HTTPException(status_code=503, detail="Raw data store not configured.")
     try:
         hdr_bytes = await request.app.state.bin_store.get(f"{path_params.bin_id}.hdr")
     except KeyError:
@@ -331,7 +342,7 @@ async def roi_archive(
 ):
     store = request.app.state.bin_store
     if store is None:
-        raise HTTPException(status_code=503, detail="Raw data store not configured, cannot serve ROI archives.")
+        raise HTTPException(status_code=503, detail="Raw data store not configured.")
     try:
         buf = await build_roi_archive(store, path_params.bin_id, path_params.extension)
     except KeyError:
@@ -339,8 +350,6 @@ async def roi_archive(
     return render_bytes(buf, _ROI_ARCHIVE_MEDIA_TYPES[path_params.extension])
 
 
-# Global capacity ceiling - runs before auth, prevents connection errors
-global_capacity = int(os.getenv("GLOBAL_CAPACITY_LIMIT", "100"))
-retry_after = int(os.getenv("CAPACITY_RETRY_AFTER", "1"))
-key_ttl = int(os.getenv("CAPACITY_KEY_TTL", "30"))
-app = GlobalCapacityMiddleware(_inner_app, max_concurrent=global_capacity, retry_after=retry_after, key_ttl=key_ttl)
+# Global capacity ceiling - runs before auth, prevents connection errors.
+# Config is read from _inner_app.state at request time (set in lifespan above).
+app = GlobalCapacityMiddleware(_inner_app)

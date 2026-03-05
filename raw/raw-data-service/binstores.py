@@ -354,15 +354,21 @@ async def build_bin_archive(store: AsyncBinStore, bin_id: str, extension: str) -
         paths = {"hdr": hdr_path, "adc": adc_path, "roi": roi_path}
         if extension == "zip":
             def write_zip():
-                with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
-                    for ext, path in paths.items():
-                        zipf.write(path, arcname=f"{bin_id}.{ext}")
+                try:
+                    with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
+                        for ext, path in paths.items():
+                            zipf.write(path, arcname=f"{bin_id}.{ext}")
+                except FileNotFoundError:
+                    raise KeyError(bin_id)
             await asyncio.to_thread(write_zip)
         elif extension == "tgz":
             def write_tgz():
-                with tarfile.open(fileobj=buffer, mode='w:gz') as tarf:
-                    for ext, path in paths.items():
-                        tarf.add(path, arcname=f"{bin_id}.{ext}")
+                try:
+                    with tarfile.open(fileobj=buffer, mode='w:gz') as tarf:
+                        for ext, path in paths.items():
+                            tarf.add(path, arcname=f"{bin_id}.{ext}")
+                except FileNotFoundError:
+                    raise KeyError(bin_id)
             await asyncio.to_thread(write_tgz)
     else:
         # Byte-based fallback for S3-backed stores (no filesystem paths available).
