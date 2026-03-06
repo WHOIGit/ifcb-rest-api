@@ -169,7 +169,7 @@ async def lifespan(app: FastAPI):
     s3_concurrent_requests = int(os.getenv("S3_CONCURRENT_REQUESTS", "50"))
 
     s3_configured = all([s3_bucket, s3_access_key, s3_secret_key])
-    fs_configured = raw_data_dir is not None
+    fs_configured = os.path.exists(raw_data_dir)
 
     app.state.s3_roi_store = None
     app.state.fs_roi_store = None
