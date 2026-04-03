@@ -2,6 +2,10 @@
 
 REST API for serving IFCB raw data files and ROI images.
 
+IFCB parsing, fileset discovery, and storage abstractions are provided by
+`ifcbkit`. This service keeps the HTTP API, auth, capacity limiting, and
+archive assembly logic.
+
 ### Required Environment Variables
 
 - `HOST_IFCB_RAW_DATA_DIR` - **Required**. Path on host machine to IFCB raw data directory (mounted to `/data/raw` in container)
