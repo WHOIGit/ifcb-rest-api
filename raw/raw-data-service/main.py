@@ -21,7 +21,7 @@ from amplify_auth import AuthClient
 from storage.s3 import BucketStore
 from storage.redis import AsyncRedisStore
 
-from .binstores import build_bin_archive, build_roi_archive
+from .archives import build_bin_archive, build_roi_archive
 from .models import RawBinParams, RawBinArchiveParams, BinIDParams, ROIImageParams, ROIArchiveParams
 from .processor import capacity_limited, CAPACITY_FAST, CAPACITY_SLOW, render_bytes
 from .redis_client import get_redis_client, close_redis_client
