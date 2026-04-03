@@ -4,43 +4,12 @@ import asyncio
 from io import BytesIO
 
 import aiofiles
+from ifcbkit import DEFAULT_INCLUDE, DEFAULT_EXCLUDE, add_target, async_find_fileset, parse_adc_bytes, parse_roi_id
+from ifcbkit.stores.s3 import IfcbBinKeyTransformer
 from PIL import Image
 
 from storage.s3 import BucketStore
 from storage.utils import KeyTransformingStore, PrefixKeyTransformer
-
-from .ifcb import async_find_fileset, DEFAULT_INCLUDE, DEFAULT_EXCLUDE
-from .ifcb_parsing import parse_roi_id, add_target
-from .s3utils import IfcbBinKeyTransformer
-
-
-def _parse_adc_bytes(bin_id: str, adc_bytes: bytes) -> dict:
-    """Parse .adc CSV bytes into ROI metadata dict."""
-    if bin_id.startswith('I'):
-        x_col, y_col, w_col, h_col = 9, 10, 11, 12
-    else:
-        x_col, y_col, w_col, h_col = 13, 14, 15, 16
-    images = {}
-    for i, line in enumerate(adc_bytes.decode('utf-8', errors='replace').splitlines()):
-        fields = line.strip().split(',')
-        try:
-            x = int(fields[x_col])
-            y = int(fields[y_col])
-            width = int(fields[w_col])
-            height = int(fields[h_col])
-        except (ValueError, IndexError):
-            continue
-        if width == 0 or height == 0:
-            continue
-        images[i + 1] = {
-            'roi_id': add_target(bin_id, i + 1),
-            'x': x,
-            'y': y,
-            'width': width,
-            'height': height,
-        }
-    return images
-
 
 def _extract_roi_images(bin_id: str, adc_bytes: bytes, roi_bytes: bytes, rois=None) -> dict:
     """Extract PIL Images from .adc and .roi bytes."""
@@ -88,7 +57,7 @@ class AsyncBinStore(ABC):
     async def list_images(self, bin_id: str) -> dict:
         """Parse .adc to return ROI metadata dict."""
         adc_bytes = await self.get(f"{bin_id}.adc")
-        return await asyncio.to_thread(_parse_adc_bytes, bin_id, adc_bytes)
+        return await asyncio.to_thread(parse_adc_bytes, bin_id, adc_bytes)
 
     async def read_images(self, bin_id: str, rois=None) -> dict:
         """Extract PIL Images from .roi for this bin."""

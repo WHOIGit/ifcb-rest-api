@@ -6,9 +6,7 @@ import os
 import re
 
 from PIL import Image
-
-from .ifcb_parsing import add_target, parse_roi_id, parse_bin_id, bin_timestamp
-
+from ifcbkit import add_target, bin_timestamp, parse_bin_id, parse_roi_id
 
 DEFAULT_EXCLUDE = ['skip', 'beads']
 DEFAULT_INCLUDE = ['data']
@@ -667,4 +665,3 @@ async def class_scores_path(directory, pid, version=4):
 async def features_path(directory, pid, version=4):
     filename = f'{pid}_features_v{version}.zip'
     return await product_path(directory, filename)
-

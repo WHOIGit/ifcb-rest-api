@@ -1,4 +1,4 @@
-from .ifcb_parsing import parse_roi_id
+from ifcbkit import parse_roi_id
 
 
 def list_roi_ids_from_s3(bucket_store, bin_id: str, prefix: str = "") -> list:

@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "amplify-auth @ git+https://github.com/WHOIGit/amplify-auth.git@v0.1.0",
     "amplify-storage-utils[s3] @ git+https://github.com/WHOIGit/amplify-storage-utils.git@v1.6.0",
+    "ifcbkit @ git+https://github.com/WHOIGit/ifcbkit.git@v0.1.0",
     "aiofiles",
     "pillow",
     "gunicorn",

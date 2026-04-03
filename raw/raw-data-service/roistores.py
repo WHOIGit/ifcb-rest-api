@@ -2,13 +2,11 @@ from abc import ABC, abstractmethod
 import asyncio
 from io import BytesIO
 
+from ifcbkit import AsyncIfcbDataDirectory, SyncIfcbDataDirectory
+from ifcbkit.stores.s3 import IfcbPidTransformer
 from storage.object import DictStore
 from storage.s3 import BucketStore
 from storage.utils import KeyTransformingStore, PrefixKeyTransformer
-
-from .ifcb import SyncIfcbDataDirectory, AsyncIfcbDataDirectory
-from .s3utils import IfcbPidTransformer
-
 
 class SyncRoiStore(ABC):
     """A store for IFCB ROI images."""
